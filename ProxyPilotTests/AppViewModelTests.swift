@@ -99,6 +99,61 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(config.promptCaching.recordsProviderCacheTelemetry)
     }
 
+    func testBuiltInProxyConfigDoesNotRequireLocalAuthForStoredUpstreamKeyWhenAuthDisabled() throws {
+        try KeychainService.set("sk-test", forKey: .zaiAPIKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.requireLocalAuth = false
+
+        let config = try vm.buildBuiltInProxyConfig()
+
+        XCTAssertEqual(config.upstreamAPIKey, "sk-test")
+        XCTAssertFalse(config.requiresAuth)
+        XCTAssertEqual(config.masterKey, "proxypilot-local-noauth")
+    }
+
+    func testBuiltInProxyConfigRequiresMasterKeyWhenLocalAuthEnabled() throws {
+        try KeychainService.set("sk-test", forKey: .zaiAPIKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.requireLocalAuth = true
+
+        XCTAssertThrowsError(try vm.buildBuiltInProxyConfig()) { error in
+            let issue = (error as? AppIssueError)?.issue
+            XCTAssertEqual(issue?.code, .missingMasterKey)
+        }
+    }
+
+    func testBuiltInProxyConfigDoesNotAllowAllFetchedModelsWhenSelectionIsEmpty() throws {
+        let vm = AppViewModel(defaults: defaults)
+        vm.upstreamProvider = .ollama
+        vm.upstreamModels = [
+            UpstreamModel(id: "cheap-allowed", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "expensive-policy-disallowed", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ]
+        vm.selectedUpstreamModels = []
+        vm.selectedXcodeAgentModel = ""
+
+        let config = try vm.buildBuiltInProxyConfig()
+
+        XCTAssertTrue(config.allowedModels.isEmpty)
+    }
+
+    func testBuiltInProxyConfigUsesOnlySelectedAndSavedDefaultsWithFetchedModels() throws {
+        defaults.set(["saved-default"], forKey: ProviderManager.defaultModelsKey(for: .ollama))
+        let vm = AppViewModel(defaults: defaults)
+        vm.upstreamProvider = .ollama
+        vm.upstreamModels = [
+            UpstreamModel(id: "selected-live", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "unselected-live", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "saved-default", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ]
+        vm.selectedUpstreamModels = ["selected-live"]
+        vm.selectedXcodeAgentModel = "unselected-live"
+
+        let config = try vm.buildBuiltInProxyConfig()
+
+        XCTAssertEqual(config.allowedModels, ["saved-default", "selected-live"])
+    }
+
     func testInputOutputLoggingDefaultsOffWithDefaultRetention() {
         let vm = AppViewModel(defaults: defaults)
 
@@ -693,7 +748,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.isStoppingCLIProxy)
     }
 
-    func testPreflightMasterKeyOptionalWhenBuiltInAuthDisabled() {
+    func testPreflightMasterKeyOptionalWhenUpstreamCredentialStoredAndBuiltInAuthDisabled() {
         let preflight = PreflightService()
         let context = PreflightContext(
             proxyURLString: "http://127.0.0.1:4000",
@@ -703,8 +758,7 @@ final class AppViewModelTests: XCTestCase {
             upstreamAPIBaseURLString: "https://api.z.ai/api/coding/paas/v4",
             fallbackUpstreamBaseURLString: "https://api.z.ai/api/coding/paas/v4",
             hasMasterKey: false,
-            hasUpstreamKey: true,
-            liteLLMScriptsExist: false
+            hasUpstreamKey: true
         )
 
         let results = preflight.run(context: context)
@@ -724,8 +778,7 @@ final class AppViewModelTests: XCTestCase {
             upstreamAPIBaseURLString: "http://localhost:11434/v1",
             fallbackUpstreamBaseURLString: "http://localhost:11434/v1",
             hasMasterKey: false,
-            hasUpstreamKey: false,
-            liteLLMScriptsExist: false
+            hasUpstreamKey: false
         )
 
         let results = preflight.run(context: context)
@@ -748,8 +801,7 @@ final class AppViewModelTests: XCTestCase {
             upstreamAPIBaseURLString: "http://127.0.0.1:59999/v1",
             fallbackUpstreamBaseURLString: "http://localhost:20128/v1",
             hasMasterKey: false,
-            hasUpstreamKey: false,
-            liteLLMScriptsExist: false
+            hasUpstreamKey: false
         )
 
         let results = preflight.run(context: context)
@@ -773,7 +825,6 @@ final class AppViewModelTests: XCTestCase {
             fallbackUpstreamBaseURLString: "http://127.0.0.1:8080/v1",
             hasMasterKey: false,
             hasUpstreamKey: false,
-            liteLLMScriptsExist: false,
             isCopilotSidecarInstalled: true,
             isCopilotGitHubAuthenticated: false
         )
@@ -797,7 +848,6 @@ final class AppViewModelTests: XCTestCase {
             fallbackUpstreamBaseURLString: "http://127.0.0.1:8080/v1",
             hasMasterKey: false,
             hasUpstreamKey: false,
-            liteLLMScriptsExist: false,
             isCopilotSidecarInstalled: true,
             isCopilotGitHubAuthenticated: true
         )
@@ -1399,7 +1449,7 @@ final class AppViewModelTests: XCTestCase {
         )
 
         XCTAssertEqual(payload["code"], "E999")
-        XCTAssertEqual(payload["mode"], "litellm")
+        XCTAssertEqual(payload["mode"], "builtin")
         XCTAssertEqual(payload["issue_actions"], "exportDiagnostics,retryStart,runPreflight")
         XCTAssertEqual(payload["preflight_failure_count"], "1")
         XCTAssertEqual(payload["preflight_failure_ids"], "upstream_base")
@@ -1561,6 +1611,29 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(config.promptCaching.mode, .observeOnly)
         XCTAssertFalse(config.promptCaching.canonicalizeJSONForCache)
         XCTAssertTrue(config.promptCaching.recordsProviderCacheTelemetry)
+    }
+
+    func testCustomProviderClearSelectionKeepsSavedDefaultsAllowedOnly() throws {
+        let vm = AppViewModel(defaults: defaults)
+        vm.addCustomProvider(name: "Together", apiBaseURL: "https://api.together.xyz/v1", apiKey: "")
+        let provider = try XCTUnwrap(vm.customProviders.first)
+        vm.activateCustomProvider(provider)
+        vm.upstreamModels = [
+            UpstreamModel(id: "safe-default", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "expensive-unselected", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ]
+        vm.selectedUpstreamModels = ["safe-default"]
+        vm.selectedXcodeAgentModel = "safe-default"
+        vm.saveSelectedModelsAsDefaults()
+        vm.setModelSelected("expensive-unselected", isSelected: true)
+
+        vm.clearUpstreamModelSelection()
+        let config = try vm.buildBuiltInProxyConfig()
+
+        XCTAssertTrue(vm.isModelSelected("safe-default"))
+        XCTAssertFalse(vm.isModelSelected("expensive-unselected"))
+        XCTAssertTrue(vm.selectedUpstreamModels.isEmpty)
+        XCTAssertEqual(config.allowedModels, ["safe-default"])
     }
 
     func testActiveCustomProviderPersistsAcrossRelaunch() throws {
@@ -2047,8 +2120,7 @@ final class AppViewModelTests: XCTestCase {
             upstreamAPIBaseURLString: "https://api.z.ai/api/coding/paas/v4",
             fallbackUpstreamBaseURLString: "https://api.z.ai/api/coding/paas/v4",
             hasMasterKey: false,
-            hasUpstreamKey: true,
-            liteLLMScriptsExist: false
+            hasUpstreamKey: true
         )
 
         let results = preflight.run(context: context)

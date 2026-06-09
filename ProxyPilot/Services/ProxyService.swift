@@ -8,50 +8,8 @@ final class ProxyService {
         let summary: String
     }
 
-    struct Paths {
-        let restartScript: URL
-        let startScript: URL
-        let stopScript: URL
-        let pidFile: URL
-        let logFile: URL
-        let configFile: URL
-    }
-
-    let paths: Paths
-
     init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
-        let toolsDir = homeDirectory.appendingPathComponent("tools/litellm", isDirectory: true)
-        self.paths = Paths(
-            restartScript: toolsDir.appendingPathComponent("restart_zai_proxy.sh"),
-            startScript: toolsDir.appendingPathComponent("start_zai_proxy.sh"),
-            stopScript: toolsDir.appendingPathComponent("stop_zai_proxy.sh"),
-            pidFile: URL(fileURLWithPath: "/tmp/litellm_zai_proxy.pid"),
-            logFile: URL(fileURLWithPath: "/tmp/litellm_zai_proxy.log"),
-            configFile: toolsDir.appendingPathComponent("zai_config.yaml")
-        )
-    }
-
-    func restart() async throws {
-        try await run(script: paths.restartScript)
-    }
-
-    func start() async throws {
-        try await run(script: paths.startScript)
-    }
-
-    func stop() async throws {
-        try await run(script: paths.stopScript)
-    }
-
-    func isRunning() -> Bool {
-        guard let pidText = try? String(contentsOf: paths.pidFile, encoding: .utf8) else { return false }
-        let trimmed = pidText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let pid = Int32(trimmed), pid > 1 else { return false }
-        return kill(pid, 0) == 0
-    }
-
-    func readLogTail(maxBytes: Int = 32_000) -> String {
-        readLogTail(from: paths.logFile, maxBytes: maxBytes)
+        _ = homeDirectory
     }
 
     func readLogTail(from logFile: URL, maxBytes: Int = 32_000) -> String {
@@ -395,36 +353,6 @@ final class ProxyService {
         return fallback.map(UpstreamModel.idOnly)
     }
 
-    private func run(script: URL) async throws {
-        let fm = FileManager.default
-        guard fm.isExecutableFile(atPath: script.path) || fm.fileExists(atPath: script.path) else {
-            throw ProxyServiceError.missingScript(script.path)
-        }
-
-        // Use zsh explicitly (execing the script directly can fail under some sandbox/FS setups).
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = [script.path]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-
-        try process.run()
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            process.terminationHandler = { p in
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(decoding: data, as: UTF8.self)
-                if p.terminationStatus == 0 {
-                    continuation.resume()
-                } else {
-                    continuation.resume(throwing: ProxyServiceError.scriptFailed(script.lastPathComponent, Int(p.terminationStatus), output))
-                }
-            }
-        }
-    }
-
     private static func buildUpstreamURL(
         base: URL,
         path: String
@@ -516,19 +444,10 @@ private struct ChatCompletionResponse: Decodable {
 }
 
 enum ProxyServiceError: LocalizedError {
-    case missingScript(String)
-    case scriptFailed(String, Int, String)
     case httpStatus(Int, String)
 
     var errorDescription: String? {
         switch self {
-        case .missingScript(let path):
-            return "Missing script: \(path)"
-        case .scriptFailed(let name, let code, let output):
-            if output.isEmpty {
-                return "\(name) failed (exit \(code))."
-            }
-            return "\(name) failed (exit \(code)): \(output)"
         case .httpStatus(let status, let body):
             if body.isEmpty {
                 return "HTTP \(status)"

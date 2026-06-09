@@ -22,6 +22,9 @@ public final class NIOProxyServer: Sendable {
         guard serverChannel.withLockedValue({ $0 }) == nil else {
             throw ProxyEngineError.alreadyRunning
         }
+        guard isLocalhostHost(config.host) else {
+            throw ProxyEngineError.bindFailed("Refusing to bind non-loopback host: \(config.host)")
+        }
 
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 256)

@@ -42,6 +42,7 @@ enum ProviderCredentialResolution {
     case selectionRequired(ProviderSelectionPrompt)
     case unknownProvider(String)
     case missingAPIKey(provider: UpstreamProvider, secretKeyName: String?)
+    case invalidUpstreamURL(provider: UpstreamProvider, url: String, reason: String)
 }
 
 enum ProviderCredentialResolver {
@@ -150,6 +151,20 @@ enum ProviderCredentialResolver {
         return ((try? secrets.exists(key: secretKey)) == true)
     }
 
+    static func validateUpstreamOverride(
+        provider: UpstreamProvider,
+        upstreamURL: String?
+    ) -> ProviderCredentialResolution? {
+        guard let upstreamURL else { return nil }
+
+        switch classifyOverride(upstreamURL, provider: provider) {
+        case .invalid(let reason):
+            return .invalidUpstreamURL(provider: provider, url: upstreamURL, reason: reason)
+        case .official, .localhost, .localNetwork:
+            return nil
+        }
+    }
+
     private static func resolveExplicit(
         provider: UpstreamProvider,
         explicitKey: String?,
@@ -158,6 +173,16 @@ enum ProviderCredentialResolver {
         environment: [String: String],
         selectedFromStoredCredentials: Bool
     ) -> ProviderCredentialResolution {
+        let overrideTrust: UpstreamOverrideTrust
+        if let upstreamURL {
+            overrideTrust = classifyOverride(upstreamURL, provider: provider)
+            if case .invalid(let reason) = overrideTrust {
+                return .invalidUpstreamURL(provider: provider, url: upstreamURL, reason: reason)
+            }
+        } else {
+            overrideTrust = .official
+        }
+
         let secretKey = provider.secretKey
         // Mirror hasCredential's trim-and-reject: a stale `export VAR=` in the
         // user's shell would otherwise short-circuit nil-coalescing with an
@@ -170,9 +195,10 @@ enum ProviderCredentialResolver {
             }
             return raw
         }
+        let mayUseStoredCredential = upstreamURL == nil || overrideTrust == .official
         let apiKey: String? = if let explicitKey {
             explicitKey
-        } else if let secretKey {
+        } else if mayUseStoredCredential, let secretKey {
             envKey ?? (try? secrets.get(key: secretKey))
         } else {
             nil
@@ -189,6 +215,94 @@ enum ProviderCredentialResolver {
             secretKeyName: secretKey,
             selectedFromStoredCredentials: selectedFromStoredCredentials
         ))
+    }
+
+    private enum UpstreamOverrideTrust: Equatable {
+        case official
+        case localhost
+        case localNetwork
+        case invalid(String)
+    }
+
+    private static func classifyOverride(_ upstreamURL: String, provider: UpstreamProvider) -> UpstreamOverrideTrust {
+        let trimmedURL = upstreamURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty else {
+            return .invalid("Upstream URL override must not be empty.")
+        }
+        guard let components = URLComponents(string: trimmedURL),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              let host = components.host,
+              !host.isEmpty else {
+            return .invalid("Upstream URL override must be an HTTP(S) URL with a host.")
+        }
+        guard components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return .invalid("Upstream URL override must not include userinfo, query, or fragment components.")
+        }
+
+        if isLocalhostURL(trimmedURL) {
+            return .localhost
+        }
+        if provider.isLocal, isPrivateNetworkURL(trimmedURL) {
+            return .localNetwork
+        }
+
+        let trustedBaseURLs = [provider.defaultAPIBaseURL] + provider.alternateAPIBaseURLs
+        guard let normalizedOverride = normalizedBaseURL(trimmedURL),
+              trustedBaseURLs.compactMap(normalizedBaseURL).contains(normalizedOverride) else {
+            return .invalid(
+                "Upstream URL overrides must point to localhost, "
+                    + "a private-network URL for local providers, "
+                    + "or the selected provider's official API base URL."
+            )
+        }
+        return .official
+    }
+
+    private static func isPrivateNetworkURL(_ rawURL: String) -> Bool {
+        guard let host = URL(string: rawURL)?.host?.lowercased() else { return false }
+        if host.hasSuffix(".local") { return true }
+        if isPrivateIPv4(host) { return true }
+        if host.contains(":"), host.hasPrefix("fc") || host.hasPrefix("fd") || host.hasPrefix("fe80:") {
+            return true
+        }
+        return false
+    }
+
+    private static func isPrivateIPv4(_ host: String) -> Bool {
+        let octets = host.split(separator: ".").compactMap { Int($0) }
+        guard octets.count == 4, octets.allSatisfy({ (0...255).contains($0) }) else {
+            return false
+        }
+
+        if octets[0] == 10 { return true }
+        if octets[0] == 172 && (16...31).contains(octets[1]) { return true }
+        if octets[0] == 192 && octets[1] == 168 { return true }
+        if octets[0] == 169 && octets[1] == 254 { return true }
+        return false
+    }
+
+    private static func normalizedBaseURL(_ rawURL: String) -> String? {
+        guard var components = URLComponents(string: rawURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(),
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return nil
+        }
+        components.scheme = scheme
+        components.host = host
+        var path = components.percentEncodedPath
+        while path.hasSuffix("/") {
+            path.removeLast()
+        }
+        components.percentEncodedPath = path.isEmpty ? "" : path
+        return components.string
     }
 
     private static func providerSelectionTitle(_ provider: UpstreamProvider) -> String {

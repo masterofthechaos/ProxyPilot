@@ -102,7 +102,7 @@ enum UpstreamClient {
         return URLSession(configuration: config)
     }()
 
-    private static func buildRequest(
+    static func buildRequest(
         path: String,
         method: String,
         headers: [(String, String)],

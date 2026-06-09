@@ -193,12 +193,13 @@ enum MCPServerSetup {
             1. preflight — inspect auth, proxy, Xcode config, blockers, and next_actions
             2. auth_set — only when preflight reports missing auth and the user supplied a key; requires allow_secret_write: true
             3. proxy_start or proxy_restart — start or update the local proxy
-            4. xcode_config_install — point Xcode at the proxy after proxy startup succeeds
-            5. verify_routing — confirm local /v1/models and Xcode config state
-            6. Tell the user to quit and relaunch Xcode
+            4. Ask the user before changing Xcode Agent routing. MCP Xcode config writes are disabled unless the user starts MCP with PROXYPILOT_MCP_ALLOW_XCODE_CONFIG=1.
+            5. xcode_config_install — only after the user explicitly confirms the persistent routing change and the call includes allow_xcode_config_write: true
+            6. verify_routing — confirm local /v1/models and Xcode config state
+            7. Tell the user to quit and relaunch Xcode
 
             Important:
-            - proxy_stop does not remove Xcode config. Call xcode_config_remove if the user wants direct Anthropic routing restored.
+            - proxy_stop does not remove Xcode config. Use xcode_config_remove only after the user explicitly confirms they want direct Anthropic routing restored.
             - Use proxy_restart instead of proxy_start when changing provider/model on an already running proxy.
             - Xcode config changes require quitting and relaunching Xcode.
             - verify_routing v1 is local-only and never sends a real upstream completion request.
@@ -336,9 +337,10 @@ enum MCPServerSetup {
                 Tool(
                     name: "xcode_config_install",
                     title: "Install Xcode Config",
-                    description: "Write Xcode Agent Mode configuration so Xcode routes requests through ProxyPilot. Writes settings.json and sets the API key override. Call this after proxy_start.",
+                    description: "Write Xcode Agent Mode configuration so Xcode routes requests through ProxyPilot. Disabled unless MCP was launched with PROXYPILOT_MCP_ALLOW_XCODE_CONFIG=1 and this call includes allow_xcode_config_write: true after explicit user confirmation.",
                     inputSchema: jsonSchemaObject(properties: [
                         "port": intProp("ProxyPilot port to point Xcode at (default 4000, range 1024-65535)"),
+                        "allow_xcode_config_write": boolProp("Must be true after the user explicitly consents to this persistent Xcode routing change"),
                     ]),
                     annotations: .init(
                         readOnlyHint: false,
@@ -350,8 +352,10 @@ enum MCPServerSetup {
                 Tool(
                     name: "xcode_config_remove",
                     title: "Remove Xcode Config",
-                    description: "Remove Xcode Agent Mode configuration, restoring Xcode to use Anthropic's servers directly.",
-                    inputSchema: emptySchema,
+                    description: "Remove Xcode Agent Mode configuration, restoring Xcode to use Anthropic's servers directly. Disabled unless MCP was launched with PROXYPILOT_MCP_ALLOW_XCODE_CONFIG=1 and this call includes allow_xcode_config_write: true after explicit user confirmation.",
+                    inputSchema: jsonSchemaObject(properties: [
+                        "allow_xcode_config_write": boolProp("Must be true after the user explicitly consents to this persistent Xcode routing change"),
+                    ]),
                     annotations: .init(
                         readOnlyHint: false,
                         destructiveHint: true,
@@ -366,7 +370,7 @@ enum MCPServerSetup {
                     inputSchema: jsonSchemaObject(properties: [
                         "provider": stringProp("Upstream provider (default: current proxy provider). Options: \(UpstreamProvider.cliOptionsDescription)"),
                         "key": stringProp("API key (optional, falls back to secrets store)"),
-                        "url": stringProp("Override base URL"),
+                        "url": stringProp("Approved provider base URL override; arbitrary origins are rejected"),
                         "filter": stringProp("Filter: exacto, verified, tool-calling, or chat"),
                         "metadata": boolProp("Return model metadata objects instead of just IDs"),
                     ]),
@@ -394,7 +398,7 @@ enum MCPServerSetup {
                     title: "Read Proxy Logs",
                     description: "Read recent proxy log lines with secrets redacted.",
                     inputSchema: jsonSchemaObject(properties: [
-                        "lines": intProp("Number of lines to return (default 75)"),
+                        "lines": intProp("Number of lines to return (default 75, range 1-1000)"),
                     ]),
                     annotations: .init(
                         readOnlyHint: true,
@@ -673,15 +677,7 @@ enum MCPServerSetup {
                                 model: reqModel
                             ),
                             text: "ProxyPilot started on port \(boundPort) -> \(upstream.title)\(modelInfo)\(selectionInfo).\nXcode is NOT yet configured. Call xcode_config_install (port: \(boundPort)) to route Xcode through ProxyPilot.",
-                            nextActions: [
-                                NextAction(
-                                    id: "install_xcode_config",
-                                    kind: .mcpTool,
-                                    tool: "xcode_config_install",
-                                    arguments: ["port": .int(Int(boundPort))],
-                                    destructive: false
-                                ),
-                            ]
+                            nextActions: [MCPXcodeConfigConsent.installNextAction(port: boundPort)]
                         )
                     }
                 } catch ProxyEngineError.alreadyRunning {
@@ -834,15 +830,7 @@ enum MCPServerSetup {
                                 model: reqModel
                             ),
                             text: "ProxyPilot restarted on port \(boundPort) -> \(upstream.title)\(modelInfo)\(selectionInfo).\nCall xcode_config_install (port: \(boundPort)) to update Xcode routing.",
-                            nextActions: [
-                                NextAction(
-                                    id: "install_xcode_config",
-                                    kind: .mcpTool,
-                                    tool: "xcode_config_install",
-                                    arguments: ["port": .int(Int(boundPort))],
-                                    destructive: false
-                                ),
-                            ]
+                            nextActions: [MCPXcodeConfigConsent.installNextAction(port: boundPort)]
                         )
                     }
                 } catch {
@@ -898,6 +886,22 @@ enum MCPServerSetup {
                 }
 
             case "xcode_config_install":
+                guard MCPXcodeConfigConsent.environmentAllowsWrites else {
+                    return toolError(
+                        tool: "xcode_config_install",
+                        code: "E052_XCODE_CONFIG_WRITE_NOT_ALLOWED",
+                        message: "MCP Xcode config writes are disabled for this server session.",
+                        suggestion: "Ask the user to run `proxypilot config install` themselves, or restart MCP with \(MCPXcodeConfigConsent.environmentVariable)=1 before retrying."
+                    )
+                }
+                guard params.arguments?[MCPXcodeConfigConsent.argumentName]?.boolValue == true else {
+                    return toolError(
+                        tool: "xcode_config_install",
+                        code: "E053_XCODE_CONFIG_WRITE_NOT_ALLOWED",
+                        message: "xcode_config_install requires explicit per-call confirmation.",
+                        suggestion: "After the user confirms this persistent Xcode routing change, retry with \(MCPXcodeConfigConsent.argumentName): true."
+                    )
+                }
                 let parsedPort = portArgument(params.arguments, default: port, tool: "xcode_config_install", allowZero: false)
                 if let error = parsedPort.error { return error }
                 let configPort = parsedPort.port ?? port
@@ -946,6 +950,22 @@ enum MCPServerSetup {
                 }
 
             case "xcode_config_remove":
+                guard MCPXcodeConfigConsent.environmentAllowsWrites else {
+                    return toolError(
+                        tool: "xcode_config_remove",
+                        code: "E052_XCODE_CONFIG_WRITE_NOT_ALLOWED",
+                        message: "MCP Xcode config writes are disabled for this server session.",
+                        suggestion: "Ask the user to run `proxypilot config remove` themselves, or restart MCP with \(MCPXcodeConfigConsent.environmentVariable)=1 before retrying."
+                    )
+                }
+                guard params.arguments?[MCPXcodeConfigConsent.argumentName]?.boolValue == true else {
+                    return toolError(
+                        tool: "xcode_config_remove",
+                        code: "E053_XCODE_CONFIG_WRITE_NOT_ALLOWED",
+                        message: "xcode_config_remove requires explicit per-call confirmation.",
+                        suggestion: "After the user confirms restoring direct Anthropic routing, retry with \(MCPXcodeConfigConsent.argumentName): true."
+                    )
+                }
                 do {
                     let removal = try XcodeConfigManager.remove()
                     let changed = removal.settingsRemoved || removal.defaultsOverrideRemoved
@@ -1013,6 +1033,23 @@ enum MCPServerSetup {
                     )
                 }
 
+                let baseURLValidation = MCPArgumentValidator.modelDiscoveryBaseURL(
+                    reqURL,
+                    provider: upstream,
+                    tool: "list_upstream_models"
+                )
+                guard case .success(let baseURL) = baseURLValidation else {
+                    if case .failure(let code, let message) = baseURLValidation {
+                        return toolError(
+                            tool: "list_upstream_models",
+                            code: code,
+                            message: message,
+                            suggestion: "Omit url to use \(upstream.defaultAPIBaseURL), or choose an approved provider endpoint."
+                        )
+                    }
+                    return toolError(tool: "list_upstream_models", code: "E036", message: "Invalid url argument.")
+                }
+
                 let secrets = SecretsProviderFactory.make()
                 let secretKeyName = secretKeyForProvider(upstream)
                 let apiKey: String? = if let reqKey {
@@ -1023,8 +1060,6 @@ enum MCPServerSetup {
                 } else {
                     nil
                 }
-
-                let baseURL = reqURL ?? upstream.defaultAPIBaseURL
 
                 do {
                     var models = try await ModelDiscovery.fetchModels(
@@ -1099,7 +1134,18 @@ enum MCPServerSetup {
                 )
 
             case "proxy_logs":
-                let lineCount = (params.arguments?["lines"]?.intValue) ?? 75
+                let lineCountValidation = MCPArgumentValidator.lineCount(
+                    params.arguments?["lines"],
+                    default: 75,
+                    name: "lines",
+                    tool: "proxy_logs"
+                )
+                guard case .success(let lineCount) = lineCountValidation else {
+                    if case .failure(let code, let message) = lineCountValidation {
+                        return toolError(tool: "proxy_logs", code: code, message: message)
+                    }
+                    return toolError(tool: "proxy_logs", code: "E036", message: "Invalid lines argument.")
+                }
                 let logLines = LogReader.tail(url: LogReader.defaultLogURL, lines: lineCount, redact: true)
                 if logLines.isEmpty {
                     return .init(content: [.text(text: "No log output yet. Start the proxy first.", annotations: nil, _meta: nil)])
@@ -1165,6 +1211,13 @@ enum MCPServerSetup {
                         destructive: false
                     ),
                 ]
+            ))
+        case .invalidUpstreamURL(let provider, let url, let reason):
+            return (nil, toolError(
+                tool: tool,
+                code: "E050",
+                message: "Invalid upstream URL override for provider \(provider.rawValue): \(url)",
+                suggestion: reason
             ))
         case .selectionRequired(let prompt):
             let message = prompt.availableProviders.isEmpty

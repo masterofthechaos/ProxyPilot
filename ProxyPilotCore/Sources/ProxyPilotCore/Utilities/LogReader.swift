@@ -7,6 +7,8 @@ public enum LogReader {
 
     /// Read the last N lines from a log file, optionally redacting secrets.
     public static func tail(url: URL, lines: Int, redact: Bool = false) -> [String] {
+        guard lines > 0 else { return [] }
+
         guard let data = try? Data(contentsOf: url),
               let content = String(data: data, encoding: .utf8) else {
             return []
@@ -23,17 +25,19 @@ public enum LogReader {
     private static func redactSecrets(in line: String) -> String {
         var result = line
         // Redact Bearer tokens
-        if let range = result.range(of: "Bearer [^ \"]+", options: .regularExpression) {
-            result.replaceSubrange(range, with: "Bearer [REDACTED]")
-        }
+        result = replacingAllMatches(in: result, pattern: "Bearer [^ \"]+", with: "Bearer [REDACTED]")
         // Redact api_key values
-        if let range = result.range(of: "api_key=[^ &\"]+", options: .regularExpression) {
-            result.replaceSubrange(range, with: "api_key=[REDACTED]")
-        }
+        result = replacingAllMatches(in: result, pattern: "api_key=[^ &\"]+", with: "api_key=[REDACTED]")
         // Redact Authorization header values
-        if let range = result.range(of: "Authorization: [^\r\n]+", options: .regularExpression) {
-            result.replaceSubrange(range, with: "Authorization: [REDACTED]")
-        }
+        result = replacingAllMatches(in: result, pattern: "Authorization: [^\r\n]+", with: "Authorization: [REDACTED]")
         return result
+    }
+
+    private static func replacingAllMatches(in text: String, pattern: String, with replacement: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return text
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: replacement)
     }
 }

@@ -15,7 +15,6 @@ enum PreflightFixAction: String, Codable {
     case openUpstreamKeyEditor
     case openCopilotLogin
     case resetProxyURL
-    case switchToBuiltInProxy
     case resetUpstreamURL
     case usePort4001
     case none
@@ -38,7 +37,6 @@ struct PreflightContext: Equatable {
     let fallbackUpstreamBaseURLString: String
     let hasMasterKey: Bool
     let hasUpstreamKey: Bool
-    let liteLLMScriptsExist: Bool
     var isCopilotSidecarInstalled: Bool = false
     var isCopilotGitHubAuthenticated: Bool = false
 }
@@ -142,7 +140,7 @@ final class PreflightService {
             ))
         }
 
-        let masterKeyRequired = !context.useBuiltInProxy || context.requireLocalAuth
+        let masterKeyRequired = context.requireLocalAuth
         if masterKeyRequired {
             if context.hasMasterKey {
                 results.append(.init(
@@ -234,32 +232,6 @@ final class PreflightService {
                     : localProviderReachabilityHint(for: context.upstreamProvider, baseURL: upstreamBaseURL),
                 status: reachable ? .pass : .warning,
                 fixAction: .none
-            ))
-        }
-
-        if context.useBuiltInProxy {
-            results.append(.init(
-                id: "litellm_scripts",
-                title: String(localized: "LiteLLM Scripts"),
-                detail: String(localized: "Skipped (built-in mode enabled)."),
-                status: .info,
-                fixAction: .none
-            ))
-        } else if context.liteLLMScriptsExist {
-            results.append(.init(
-                id: "litellm_scripts",
-                title: String(localized: "LiteLLM Scripts"),
-                detail: String(localized: "Required LiteLLM scripts were found."),
-                status: .pass,
-                fixAction: .none
-            ))
-        } else {
-            results.append(.init(
-                id: "litellm_scripts",
-                title: String(localized: "LiteLLM Scripts"),
-                detail: String(localized: "LiteLLM scripts are missing. Switch to built-in mode or install scripts."),
-                status: .fail,
-                fixAction: .switchToBuiltInProxy
             ))
         }
 

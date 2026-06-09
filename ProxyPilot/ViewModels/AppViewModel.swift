@@ -776,9 +776,7 @@ final class AppViewModel: ObservableObject {
         let fm = FileManager.default
         let logURLs: [URL] = [
             Self.builtInProxyLogFileURL,
-            Self.toolchainLogFileURL,
-            proxyService.paths.logFile,
-            proxyService.paths.pidFile
+            Self.toolchainLogFileURL
         ]
         for url in logURLs {
             try? fm.removeItem(at: url)
@@ -1553,7 +1551,7 @@ final class AppViewModel: ObservableObject {
     }
 
     var currentLogSourcePath: String {
-        useBuiltInProxy ? Self.builtInProxyLogFileURL.path : proxyService.paths.logFile.path
+        Self.builtInProxyLogFileURL.path
     }
 
     var xcodeLocallyHostedPortText: String {
@@ -2314,13 +2312,6 @@ final class AppViewModel: ObservableObject {
         preflightResults.contains { $0.status == .fail }
     }
 
-    var liteLLMScriptsExist: Bool {
-        let fm = FileManager.default
-        return fm.fileExists(atPath: proxyService.paths.startScript.path)
-            && fm.fileExists(atPath: proxyService.paths.stopScript.path)
-            && fm.fileExists(atPath: proxyService.paths.restartScript.path)
-    }
-
     init(
         defaults: UserDefaults = .standard,
         proxyService: ProxyService = ProxyService(),
@@ -2553,7 +2544,7 @@ final class AppViewModel: ObservableObject {
         refreshAgentConfigInstallationState()
         statusRefreshSequence += 1
         let sequence = statusRefreshSequence
-        let locallyRunning = useBuiltInProxy ? localProxyServer.state.isRunning : proxyService.isRunning()
+        let locallyRunning = localProxyServer.state.isRunning
         applyProxyRuntimeStatus(locallyRunning ? .runningInApp : .stopped)
         refreshLogText()
         Task { await refreshReachableProxyStatus(sequence: sequence, locallyRunning: locallyRunning) }
@@ -2847,8 +2838,6 @@ final class AppViewModel: ObservableObject {
             Task { await openCopilotLoginTerminal() }
         case .resetProxyURL:
             performIssueAction(.resetProxyURL)
-        case .switchToBuiltInProxy:
-            performIssueAction(.useBuiltInProxy)
         case .resetUpstreamURL:
             performIssueAction(.resetUpstreamURL)
         case .usePort4001:
@@ -2870,7 +2859,6 @@ final class AppViewModel: ObservableObject {
             fallbackUpstreamBaseURLString: selectedUpstreamProviderDefaultAPIBaseURL,
             hasMasterKey: hasMasterKey,
             hasUpstreamKey: hasUpstreamKey,
-            liteLLMScriptsExist: liteLLMScriptsExist,
             isCopilotSidecarInstalled: !copilotSidecarExecutablePath.isEmpty,
             isCopilotGitHubAuthenticated: isCopilotSidecarGitHubAuthenticated
         )
@@ -3201,21 +3189,7 @@ final class AppViewModel: ObservableObject {
 
         reconcileXcodeAgentModelSelection()
 
-        if useBuiltInProxy {
-            await proxyLifecycle.restartProxy()
-        } else {
-            do {
-                try writeLiteLLMConfig(models: models)
-                try await proxyService.restart()
-            } catch {
-                applyIssue(issueFor(
-                    error,
-                    fallbackCode: .generic,
-                    fallbackTitle: String(localized: "Sync Failed"),
-                    fallbackActions: [.exportDiagnostics]
-                ))
-            }
-        }
+        await proxyLifecycle.restartProxy()
 
         refreshStatus()
     }
@@ -3300,7 +3274,6 @@ final class AppViewModel: ObservableObject {
         let context = DiagnosticsExportContext(
             builtInLogURL: Self.builtInProxyLogFileURL,
             toolchainLogURL: Self.toolchainLogFileURL,
-            liteLLMLogURL: proxyService.paths.logFile,
             manifest: manifest
         )
 
@@ -3494,56 +3467,6 @@ final class AppViewModel: ObservableObject {
 
         A technical support summary has been copied to the clipboard if you need it.
         """
-    }
-
-    private func writeLiteLLMConfig(models: [String]) throws {
-        let configURL = proxyService.paths.configFile
-        let rawAPIBase = upstreamAPIBaseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallbackAPIBase = selectedUpstreamProviderDefaultAPIBaseURL
-        let normalizedInput = rawAPIBase.isEmpty ? fallbackAPIBase : rawAPIBase
-
-        guard let normalizedURL = proxyService.normalizedUpstreamAPIBase(from: normalizedInput) else {
-            throw IssueError(issue: AppIssue(
-                code: .invalidProxyURL,
-                title: String(localized: "Invalid Upstream Base URL"),
-                message: String(localized: "Upstream API base URL is invalid."),
-                actions: [.resetUpstreamURL]
-            ))
-        }
-
-        let apiBase = normalizedURL.absoluteString
-
-        let header = """
-# LiteLLM proxy config for an OpenAI-compatible upstream endpoint.
-#
-# IMPORTANT:
-# - Do not put your API key in this file. Use env vars instead.
-#
-# Env vars:
-# - ZAI_API_KEY (legacy variable name used as generic upstream key)
-# - LITELLM_MASTER_KEY
-
-"""
-
-        var body = "model_list:\n"
-        for model in models {
-            body += """
-  - model_name: \(model)
-    litellm_params:
-      custom_llm_provider: openai
-      model: \(model)
-      api_base: \(apiBase)
-      api_key: os.environ/ZAI_API_KEY
-
-"""
-        }
-
-        body += """
-general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY
-"""
-
-        try (header + body).write(to: configURL, atomically: true, encoding: .utf8)
     }
 
     private func resolveCLIExecutableURL() -> URL? {
@@ -3893,6 +3816,7 @@ general_settings:
             ))
         }
 
+        let upstreamKey = selectedUpstreamAPIKey()
         let masterKey: String
         if requireLocalAuth {
             guard let configuredMasterKey = KeychainService.get(key: .litellmMasterKey)?
@@ -3910,17 +3834,18 @@ general_settings:
             masterKey = "proxypilot-local-noauth"
         }
 
-        let upstreamKey = selectedUpstreamAPIKey()
-
+        let hasFetchedModels = !upstreamModels.isEmpty
         var allowedModels: Set<String> = {
             if provider == .githubCopilot { return Set(proxySyncModelCandidates) }
-            if !selectedUpstreamModels.isEmpty { return selectedUpstreamModels }
-            if !upstreamModels.isEmpty { return Set(upstreamModels.map(\.id)) }
+            if !selectedUpstreamModels.isEmpty {
+                return selectedUpstreamModels.union(savedDefaultModels)
+            }
+            if hasFetchedModels { return Set(savedDefaultModels) }
             if let fallback = provider.fallbackModelIDs { return Set(fallback) }
             return Set(savedDefaultModels)
         }()
         let preferredModel = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !preferredModel.isEmpty {
+        if !preferredModel.isEmpty, (!hasFetchedModels || allowedModels.contains(preferredModel)) {
             allowedModels.insert(preferredModel)
         }
 
@@ -4006,15 +3931,11 @@ general_settings:
     }
 
     private func refreshLogText() {
-        if useBuiltInProxy {
-            logText = proxyService.readLogTail(from: Self.builtInProxyLogFileURL)
-        } else {
-            logText = proxyService.readLogTail()
-        }
+        logText = proxyService.readLogTail(from: Self.builtInProxyLogFileURL)
     }
 
     func clearLog() {
-        let logURL = useBuiltInProxy ? Self.builtInProxyLogFileURL : proxyService.paths.logFile
+        let logURL = Self.builtInProxyLogFileURL
         try? FileManager.default.removeItem(at: logURL)
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         logText = ""
@@ -4123,7 +4044,7 @@ general_settings:
             "fix_actions": joinedTelemetryValues(fixActions),
             "mode": proxyModeTelemetryValue(useBuiltInProxy: useBuiltInProxy),
             "provider_class": providerClassTelemetryValue(upstreamProvider),
-            "local_auth_required": String(!useBuiltInProxy || requireLocalAuth),
+            "local_auth_required": String(requireLocalAuth),
             "upstream_key_required": String(upstreamProvider.requiresAPIKey)
         ])
     }
@@ -4183,7 +4104,7 @@ general_settings:
     }
 
     private static func proxyModeTelemetryValue(useBuiltInProxy: Bool) -> String {
-        useBuiltInProxy ? "builtin" : "litellm"
+        "builtin"
     }
 
     private static func providerClassTelemetryValue(_ provider: UpstreamProvider) -> String {
@@ -4424,7 +4345,7 @@ general_settings:
             appVersion: version,
             buildNumber: build,
             macOSVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            mode: useBuiltInProxy ? "built-in" : "litellm",
+            mode: "built-in",
             proxyURL: proxyURLString,
             upstreamBase: upstreamAPIBaseURLString,
             selectedModel: effectiveXcodeAgentModel,

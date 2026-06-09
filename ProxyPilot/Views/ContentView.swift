@@ -494,25 +494,19 @@ struct ContentView: View {
                     EmptyView()
                 }
 
-                if vm.useBuiltInProxy {
-                    Text("Built-in proxy serves `GET /v1/models`, forwards `POST /v1/chat/completions`, and translates `POST /v1/messages`.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(verbatim: String(localized: "Anthropic translator mode:") + " " + vm.anthropicTranslatorModeText)
+                Text("Built-in proxy serves `GET /v1/models`, forwards `POST /v1/chat/completions`, and translates `POST /v1/messages`.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(verbatim: String(localized: "Anthropic translator mode:") + " " + vm.anthropicTranslatorModeText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                DisclosureGroup("Terms") {
+                    Text(vm.contextualTerminologyHelpText)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    DisclosureGroup("Terms") {
-                        Text(vm.contextualTerminologyHelpText)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                    .font(.caption)
-                } else {
-                    Text("LiteLLM mode requires scripts in `~/tools/litellm/`.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
                 }
+                .font(.caption)
             }
 
             Button { selectedSection = .advanced } label: {
@@ -1738,26 +1732,12 @@ struct ContentView: View {
     private var advancedTab: some View {
         Form {
             Section("Advanced") {
-                DisclosureGroup("LiteLLM Mode (Advanced)") {
-                    Toggle("Use LiteLLM scripts instead of built-in proxy", isOn: Binding(
-                        get: { !vm.useBuiltInProxy },
-                        set: { vm.useBuiltInProxy = !$0 }
-                    ))
-                    .toggleStyle(.switch)
-                    .accessibilityLabel("Use LiteLLM mode")
-                    .accessibilityHint("Disables built-in proxy and uses external LiteLLM scripts.")
-
-                    Text("Requires `start_zai_proxy.sh`, `stop_zai_proxy.sh`, and `restart_zai_proxy.sh` in `~/tools/litellm/`.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
                 Toggle("Require auth for local proxy (advanced)", isOn: Binding(
                     get: { vm.requireLocalAuth },
                     set: { vm.requireLocalAuth = $0 }
                 ))
                 .toggleStyle(.switch)
-                .help("Xcode Locally Hosted mode may fail when auth is required.")
+                .help("When enabled, non-model local proxy routes require the Local Proxy Password.")
                 .accessibilityLabel("Require local proxy authentication")
 
                 Toggle("Use legacy Anthropic translator fallback", isOn: Binding(
@@ -2212,12 +2192,13 @@ struct ContentView: View {
     }
 
     private var routingVerificationCommands: String {
-        """
+        let preferredPattern = ShellArgumentEscaper.singleQuote("preferred=\(vm.effectiveXcodeAgentModel)")
+        return """
         tail -f /tmp/proxypilot_builtin_proxy.log
 
-        rg -n "anthropic model remap" /tmp/proxypilot_builtin_proxy.log | tail -n 8
+        rg -n -F -- 'anthropic model remap' /tmp/proxypilot_builtin_proxy.log | tail -n 8
 
-        rg -n "preferred=\(vm.effectiveXcodeAgentModel)" /tmp/proxypilot_builtin_proxy.log | tail -n 3
+        rg -n -F -- \(preferredPattern) /tmp/proxypilot_builtin_proxy.log | tail -n 3
         """
     }
 

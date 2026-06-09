@@ -50,13 +50,7 @@ enum AgentPreflightService {
         }
 
         if !config.isInstalled {
-            actions.append(NextAction(
-                id: "install_xcode_config",
-                kind: .mcpTool,
-                tool: "xcode_config_install",
-                arguments: ["port": .int(Int(port))],
-                destructive: false
-            ))
+            actions.append(MCPXcodeConfigConsent.installNextAction(port: port))
         }
 
         let payload = AgentPreflightPayload(

@@ -273,6 +273,116 @@ private func assertGoogleSchemaSanitized(provider: UpstreamProvider, model: Stri
     #expect(result.usedGoogleBypassFallback == false)
 }
 
+@Test func requestToOpenAIInjectsGoogleGemini3FallbackForModelsPrefixedID() throws {
+    let anthropic: [String: Any] = [
+        "model": "claude-opus-4-8",
+        "messages": [
+            [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "search",
+                        "input": ["query": "ProxyPilot"]
+                    ]
+                ]
+            ]
+        ]
+    ]
+
+    let result = AnthropicTranslator.requestToOpenAI(
+        anthropic,
+        context: .init(
+            upstreamProvider: .google,
+            resolvedUpstreamModel: "models/gemini-3.5-flash",
+            googleThoughtSignatureStore: GoogleThoughtSignatureStore()
+        )
+    )
+
+    let messages = try #require(result.payload["messages"] as? [[String: Any]])
+    let assistant = try #require(messages.first)
+    let toolCalls = try #require(assistant["tool_calls"] as? [[String: Any]])
+    let toolCall = try #require(toolCalls.first)
+    let extraContent = try #require(toolCall["extra_content"] as? [String: Any])
+    let google = try #require(extraContent["google"] as? [String: Any])
+    #expect(google["thought_signature"] as? String == "skip_thought_signature_validator")
+    #expect(result.injectedGoogleSignatures == 0)
+    #expect(result.usedGoogleBypassFallback == true)
+}
+
+@Test func requestToOpenAIInjectsGoogleGemini3FallbackForGooglePrefixedID() throws {
+    let anthropic: [String: Any] = [
+        "model": "claude-opus-4-8",
+        "messages": [
+            [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "search",
+                        "input": ["query": "ProxyPilot"]
+                    ]
+                ]
+            ]
+        ]
+    ]
+
+    let result = AnthropicTranslator.requestToOpenAI(
+        anthropic,
+        context: .init(
+            upstreamProvider: .google,
+            resolvedUpstreamModel: "google/gemini-3.5-flash",
+            googleThoughtSignatureStore: GoogleThoughtSignatureStore()
+        )
+    )
+
+    let messages = try #require(result.payload["messages"] as? [[String: Any]])
+    let assistant = try #require(messages.first)
+    let toolCalls = try #require(assistant["tool_calls"] as? [[String: Any]])
+    let toolCall = try #require(toolCalls.first)
+    let extraContent = try #require(toolCall["extra_content"] as? [String: Any])
+    let google = try #require(extraContent["google"] as? [String: Any])
+    #expect(google["thought_signature"] as? String == "skip_thought_signature_validator")
+    #expect(result.usedGoogleBypassFallback == true)
+}
+
+@Test func requestToOpenAIOpenRouterGoogleModelDoesNotUseDirectGoogleFallback() throws {
+    let anthropic: [String: Any] = [
+        "model": "claude-opus-4-8",
+        "messages": [
+            [
+                "role": "assistant",
+                "content": [
+                    [
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "search",
+                        "input": ["query": "ProxyPilot"]
+                    ]
+                ]
+            ]
+        ]
+    ]
+
+    let result = AnthropicTranslator.requestToOpenAI(
+        anthropic,
+        context: .init(
+            upstreamProvider: .openRouter,
+            resolvedUpstreamModel: "google/gemini-3.5-flash",
+            googleThoughtSignatureStore: GoogleThoughtSignatureStore()
+        )
+    )
+
+    let messages = try #require(result.payload["messages"] as? [[String: Any]])
+    let assistant = try #require(messages.first)
+    let toolCalls = try #require(assistant["tool_calls"] as? [[String: Any]])
+    let toolCall = try #require(toolCalls.first)
+    #expect(toolCall["extra_content"] == nil)
+    #expect(result.usedGoogleBypassFallback == false)
+}
+
 @Test func requestToOpenAIPreservesAssistantThinkingBlocksAsTaggedText() throws {
     let anthropic: [String: Any] = [
         "model": "claude-sonnet-4-5-20250514",

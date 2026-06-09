@@ -49,8 +49,31 @@ struct MCPToolPayloadTests {
         let plan = MCPStopResponsePlanner.plan(configInstalled: true)
 
         #expect(plan.text.contains("Xcode config is still installed"))
-        #expect(plan.nextActions.map(\.tool) == ["xcode_config_remove"])
+        #expect(plan.nextActions.map(\.id) == ["authorize_xcode_config_remove"])
+        #expect(plan.nextActions.map(\.kind) == [.user])
         #expect(plan.nextActions.allSatisfy { $0.destructive })
+    }
+
+    @Test func xcodeConfigInstallNextActionRequiresUserAuthorizationByDefault() {
+        let action = MCPXcodeConfigConsent.installNextAction(port: 4123)
+
+        #expect(action.id == "authorize_xcode_config_install")
+        #expect(action.kind == .user)
+        #expect(action.tool == nil)
+        #expect(action.command?.contains(MCPXcodeConfigConsent.environmentVariable) == true)
+        #expect(action.message?.contains(MCPXcodeConfigConsent.argumentName) == true)
+        #expect(action.destructive)
+    }
+
+    @Test func xcodeConfigRemoveNextActionRequiresUserAuthorizationByDefault() {
+        let action = MCPXcodeConfigConsent.removeNextAction()
+
+        #expect(action.id == "authorize_xcode_config_remove")
+        #expect(action.kind == .user)
+        #expect(action.tool == nil)
+        #expect(action.command?.contains(MCPXcodeConfigConsent.environmentVariable) == true)
+        #expect(action.message?.contains(MCPXcodeConfigConsent.argumentName) == true)
+        #expect(action.destructive)
     }
 
     @Test func statusProbeUsesRequestedPortWhenNoManagedPortExists() {

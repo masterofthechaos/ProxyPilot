@@ -66,7 +66,13 @@ struct HomeDashboardView: View {
                 ViewThatFits {
                     HStack(spacing: 12) {
                         heroMetric("Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right")
-                        heroMetric("Tokens", vm.sessionReportCard.totalTokensFormatted, systemImage: "number")
+                        heroMetric(
+                            "Tokens",
+                            vm.sessionReportCard.totalTokensFormatted,
+                            systemImage: "number"
+                        ) {
+                            tokenDirectionDetail
+                        }
                         heroMetric(vm.sessionCacheMetricLabel, vm.sessionCacheMetricValue, systemImage: "bolt.horizontal")
                         heroMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD), systemImage: "dollarsign.circle")
                         heroMetric("Latency", sessionLatencyText, systemImage: "timer")
@@ -74,7 +80,13 @@ struct HomeDashboardView: View {
 
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
                         heroMetric("Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right")
-                        heroMetric("Tokens", vm.sessionReportCard.totalTokensFormatted, systemImage: "number")
+                        heroMetric(
+                            "Tokens",
+                            vm.sessionReportCard.totalTokensFormatted,
+                            systemImage: "number"
+                        ) {
+                            tokenDirectionDetail
+                        }
                         heroMetric(vm.sessionCacheMetricLabel, vm.sessionCacheMetricValue, systemImage: "bolt.horizontal")
                         heroMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD), systemImage: "dollarsign.circle")
                         heroMetric("Latency", sessionLatencyText, systemImage: "timer")
@@ -593,13 +605,34 @@ struct HomeDashboardView: View {
         return "p95 \(formatLatency(latency.p95))"
     }
 
+    private var tokenDirectionDetail: some View {
+        HStack(spacing: 7) {
+            tokenDirectionValue(
+                systemImage: "arrow.up",
+                value: formatCompactInteger(vm.sessionReportCard.totalPromptTokens),
+                help: "Prompt tokens"
+            )
+            tokenDirectionValue(
+                systemImage: "arrow.down",
+                value: formatCompactInteger(vm.sessionReportCard.totalCompletionTokens),
+                help: "Completion tokens"
+            )
+        }
+        .foregroundStyle(.secondary)
+    }
+
     private var preflightSummary: String {
         if vm.preflightResults.isEmpty { return "Preflight not checked" }
         if vm.preflightHasBlockingFailures { return "Preflight needs attention" }
         return vm.isRunning ? "Preflight passed" : "Ready to start"
     }
 
-    private func heroMetric(_ label: String, _ value: String, systemImage: String) -> some View {
+    private func heroMetric<Detail: View>(
+        _ label: String,
+        _ value: String,
+        systemImage: String,
+        @ViewBuilder detail: () -> Detail
+    ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Image(systemName: systemImage)
                 .foregroundStyle(.secondary)
@@ -607,6 +640,7 @@ struct HomeDashboardView: View {
                 .font(.system(.title3, design: .rounded).weight(.semibold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
+            detail()
             Text(label)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -614,6 +648,24 @@ struct HomeDashboardView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func heroMetric(_ label: String, _ value: String, systemImage: String) -> some View {
+        heroMetric(label, value, systemImage: systemImage) {
+            EmptyView()
+        }
+    }
+
+    private func tokenDirectionValue(systemImage: String, value: String, help: String) -> some View {
+        HStack(spacing: 2) {
+            Image(systemName: systemImage)
+                .font(.system(size: 8, weight: .bold))
+            Text(value)
+                .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .help(help)
     }
 
     private func smallMetric(_ label: String, _ value: String) -> some View {

@@ -16,7 +16,6 @@ struct DiagnosticsManifest: Codable {
 struct DiagnosticsExportContext {
     let builtInLogURL: URL
     let toolchainLogURL: URL
-    let liteLLMLogURL: URL
     let manifest: DiagnosticsManifest
 }
 
@@ -24,7 +23,6 @@ final class DiagnosticsService: Sendable {
     static let includedFiles = [
         "builtin_proxy.log",
         "toolchain.log",
-        "litellm.log",
         "manifest.json"
     ]
 
@@ -51,7 +49,6 @@ final class DiagnosticsService: Sendable {
 
         try writeRedactedFileIfPresent(source: context.builtInLogURL, destination: root.appendingPathComponent("builtin_proxy.log"))
         try writeRedactedFileIfPresent(source: context.toolchainLogURL, destination: root.appendingPathComponent("toolchain.log"))
-        try writeRedactedFileIfPresent(source: context.liteLLMLogURL, destination: root.appendingPathComponent("litellm.log"))
 
         let manifestURL = root.appendingPathComponent("manifest.json")
         let manifestData = try JSONEncoder.pretty.encode(context.manifest)

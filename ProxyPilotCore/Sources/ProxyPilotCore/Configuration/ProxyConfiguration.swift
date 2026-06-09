@@ -11,6 +11,7 @@ public struct ProxyConfiguration: Sendable {
     public let masterKey: String?
     public let allowedModels: Set<String>
     public let requiresAuth: Bool
+    public let maxRequestBodyBytes: Int
     public let anthropicTranslatorMode: AnthropicTranslatorMode
     public let miniMaxRoutingMode: MiniMaxRoutingMode
     public let preferredAnthropicUpstreamModel: String
@@ -29,6 +30,7 @@ public struct ProxyConfiguration: Sendable {
         masterKey: String? = nil,
         allowedModels: Set<String> = [],
         requiresAuth: Bool = false,
+        maxRequestBodyBytes: Int = 10 * 1024 * 1024,
         anthropicTranslatorMode: AnthropicTranslatorMode = .hardened,
         miniMaxRoutingMode: MiniMaxRoutingMode = .standard,
         preferredAnthropicUpstreamModel: String = "",
@@ -46,6 +48,7 @@ public struct ProxyConfiguration: Sendable {
         self.masterKey = masterKey
         self.allowedModels = allowedModels
         self.requiresAuth = requiresAuth
+        self.maxRequestBodyBytes = maxRequestBodyBytes
         self.anthropicTranslatorMode = anthropicTranslatorMode
         self.miniMaxRoutingMode = miniMaxRoutingMode
         self.preferredAnthropicUpstreamModel = preferredAnthropicUpstreamModel

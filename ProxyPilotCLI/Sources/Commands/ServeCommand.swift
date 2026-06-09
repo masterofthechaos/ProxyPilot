@@ -129,6 +129,14 @@ struct ServeCommand: AsyncParsableCommand {
                 suggestion: "Run 'proxypilot auth set --provider \(missingProvider.rawValue)', pass --key, or set \(secretKeyName ?? "the provider env var").",
                 json: json
             )
+        case .invalidUpstreamURL(let invalidProvider, let url, let reason):
+            OutputFormatter.error(
+                command: "serve",
+                code: "E050",
+                message: "Invalid upstream URL override for provider \(invalidProvider.rawValue): \(url)",
+                suggestion: reason,
+                json: json
+            )
         case .selectionRequired(let prompt):
             OutputFormatter.error(
                 command: "serve",

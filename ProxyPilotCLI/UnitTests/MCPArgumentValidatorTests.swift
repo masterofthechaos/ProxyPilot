@@ -143,4 +143,85 @@ struct MCPArgumentValidatorTests {
 
         #expect(result == .success("fallback"))
     }
+
+    @Test func unsafeModelDiscoveryURLIsRejected() {
+        let result = MCPArgumentValidator.modelDiscoveryBaseURL(
+            "https://attacker.example/v1",
+            provider: .openAI,
+            tool: "list_upstream_models"
+        )
+
+        #expect(result.isFailure(code: "E036"))
+    }
+
+    @Test func modelDiscoveryURLRejectsURLTricks() {
+        let unsafeURLs = [
+            "https://user:secret@api.openai.com/v1",
+            "https://api.openai.com/v1?target=https://attacker.example",
+            "https://api.openai.com/v1#https://attacker.example",
+        ]
+
+        for unsafeURL in unsafeURLs {
+            let result = MCPArgumentValidator.modelDiscoveryBaseURL(
+                unsafeURL,
+                provider: .openAI,
+                tool: "list_upstream_models"
+            )
+
+            #expect(result.isFailure(code: "E036"))
+        }
+    }
+
+    @Test func defaultModelDiscoveryURLIsAcceptedWhenOmitted() {
+        let result = MCPArgumentValidator.modelDiscoveryBaseURL(
+            nil,
+            provider: .openAI,
+            tool: "list_upstream_models"
+        )
+
+        #expect(result == .success(UpstreamProvider.openAI.defaultAPIBaseURL))
+    }
+
+    @Test func approvedAlternateModelDiscoveryURLIsAccepted() {
+        let result = MCPArgumentValidator.modelDiscoveryBaseURL(
+            "https://api.minimaxi.com/v1/",
+            provider: .miniMax,
+            tool: "list_upstream_models"
+        )
+
+        #expect(result == .success("https://api.minimaxi.com/v1/"))
+    }
+
+    @Test func negativeLineCountIsRejected() {
+        let result = MCPArgumentValidator.lineCount(
+            Value.int(-1),
+            default: 75,
+            name: "lines",
+            tool: "proxy_logs"
+        )
+
+        #expect(result == .failure(code: "E036", message: "Invalid lines -1. Use 1-1000."))
+    }
+
+    @Test func excessiveLineCountIsRejected() {
+        let result = MCPArgumentValidator.lineCount(
+            Value.int(1001),
+            default: 75,
+            name: "lines",
+            tool: "proxy_logs"
+        )
+
+        #expect(result == .failure(code: "E036", message: "Invalid lines 1001. Use 1-1000."))
+    }
+
+    @Test func omittedLineCountUsesDefault() {
+        let result = MCPArgumentValidator.lineCount(
+            nil,
+            default: 75,
+            name: "lines",
+            tool: "proxy_logs"
+        )
+
+        #expect(result == .success(75))
+    }
 }

@@ -547,34 +547,6 @@
         }
       }
     },
-    "LiteLLM Mode (Advanced)" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : { "state" : "translated", "value" : "LiteLLM 模式（高级）" }
-        }
-      }
-    },
-    "LiteLLM mode requires scripts in `~/tools/litellm/`." : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : { "state" : "translated", "value" : "LiteLLM 模式需要 `~/tools/litellm/` 中的脚本。" }
-        }
-      }
-    },
-    "LiteLLM Scripts" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : { "state" : "translated", "value" : "LiteLLM 脚本" }
-        }
-      }
-    },
-    "LiteLLM scripts are missing. Switch to built-in mode or install scripts." : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : { "state" : "translated", "value" : "缺少 LiteLLM 脚本。请切换到内置模式或安装脚本。" }
-        }
-      }
-    },
     "Local OpenAI-compatible proxy for Xcode Intelligence. Supports streaming and Anthropic API translation." : {
       "localizations" : {
         "zh-Hans" : {
@@ -957,13 +929,6 @@
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : { "state" : "translated", "value" : "请求过大" }
-        }
-      }
-    },
-    "Required LiteLLM scripts were found." : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : { "state" : "translated", "value" : "已找到必需的 LiteLLM 脚本。" }
         }
       }
     },
@@ -1433,13 +1398,6 @@
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : { "state" : "translated", "value" : "使用旧版 Anthropic 翻译器回退" }
-        }
-      }
-    },
-    "Use LiteLLM scripts instead of built-in proxy" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : { "state" : "translated", "value" : "使用 LiteLLM 脚本替代内置代理" }
         }
       }
     },

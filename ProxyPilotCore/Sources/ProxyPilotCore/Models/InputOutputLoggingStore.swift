@@ -240,6 +240,7 @@ public enum InputOutputLogStoreError: Error, Sendable {
 public actor InputOutputLogStore {
     public let url: URL
     private let encryptionKey: Data
+    private static let privateFilePermissions: Int = 0o600
 
     public init(url: URL = InputOutputLogStore.defaultURL, encryptionKey: Data) {
         self.url = url
@@ -276,7 +277,13 @@ public actor InputOutputLogStore {
         line.append(0x0A)
 
         if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+            FileManager.default.createFile(
+                atPath: url.path,
+                contents: nil,
+                attributes: [.posixPermissions: Self.privateFilePermissions]
+            )
+        } else {
+            try applyPrivateFilePermissions()
         }
 
         let handle = try FileHandle(forWritingTo: url)
@@ -360,6 +367,14 @@ public actor InputOutputLogStore {
             output.append(0x0A)
         }
         try output.write(to: url, options: .atomic)
+        try applyPrivateFilePermissions()
+    }
+
+    private func applyPrivateFilePermissions() throws {
+        try FileManager.default.setAttributes(
+            [.posixPermissions: Self.privateFilePermissions],
+            ofItemAtPath: url.path
+        )
     }
 
     private func encrypt(_ data: Data) throws -> String {

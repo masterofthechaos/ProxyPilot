@@ -22,7 +22,10 @@ let package = Package(
         ),
         .testTarget(
             name: "ProxyPilotCoreTests",
-            dependencies: ["ProxyPilotCore"]
+            dependencies: [
+                "ProxyPilotCore",
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ]
         ),
     ]
 )

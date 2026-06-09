@@ -1,3 +1,4 @@
+import Foundation
 import MCP
 import ProxyPilotCore
 
@@ -141,5 +142,82 @@ enum MCPArgumentValidator {
         }
 
         return .success(value)
+    }
+
+    static func lineCount(
+        _ raw: Value?,
+        default defaultValue: Int,
+        name: String,
+        tool _: String,
+        range: ClosedRange<Int> = 1...1_000
+    ) -> MCPArgumentValidation<Int> {
+        guard let raw else {
+            return .success(defaultValue)
+        }
+
+        guard let value = raw.intValue else {
+            return .failure(code: "E035", message: "Invalid \(name) argument. Expected integer.")
+        }
+
+        guard range.contains(value) else {
+            return .failure(
+                code: "E036",
+                message: "Invalid \(name) \(value). Use \(range.lowerBound)-\(range.upperBound)."
+            )
+        }
+
+        return .success(value)
+    }
+
+    static func modelDiscoveryBaseURL(
+        _ raw: String?,
+        provider: UpstreamProvider,
+        tool _: String
+    ) -> MCPArgumentValidation<String> {
+        guard let raw else {
+            return .success(provider.defaultAPIBaseURL)
+        }
+
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failure(code: "E036", message: "Invalid url argument. Expected an approved provider base URL.")
+        }
+
+        guard let candidate = normalizedBaseURL(trimmed) else {
+            return .failure(code: "E036", message: "Invalid url argument. Expected an absolute http(s) provider base URL with no userinfo, query, or fragment.")
+        }
+
+        let approvedURLs = [provider.defaultAPIBaseURL] + provider.alternateAPIBaseURLs
+        let approved = approvedURLs.compactMap(normalizedBaseURL)
+        guard approved.contains(candidate) else {
+            return .failure(
+                code: "E036",
+                message: "Unsafe url override for \(provider.rawValue). list_upstream_models only uses the provider's approved model endpoints."
+            )
+        }
+
+        return .success(trimmed)
+    }
+
+    private static func normalizedBaseURL(_ raw: String) -> String? {
+        guard var components = URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              let host = components.host?.lowercased(),
+              components.user == nil,
+              components.password == nil,
+              components.query == nil,
+              components.fragment == nil else {
+            return nil
+        }
+
+        components.scheme = scheme
+        components.host = host
+        var path = components.percentEncodedPath
+        while path.hasSuffix("/") {
+            path.removeLast()
+        }
+        components.percentEncodedPath = path.isEmpty ? "" : path
+        return components.string
     }
 }

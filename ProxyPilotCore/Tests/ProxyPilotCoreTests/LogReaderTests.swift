@@ -47,4 +47,38 @@ final class LogReaderTests: XCTestCase {
         let result = LogReader.tail(url: missing, lines: 10)
         XCTAssertTrue(result.isEmpty)
     }
+
+    func testTailNegativeLineCountReturnsEmptyInsteadOfCrashing() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("logreader_test_\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try "one\ntwo".write(to: tmp, atomically: true, encoding: .utf8)
+
+        let result = LogReader.tail(url: tmp, lines: -1)
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    func testTailZeroLineCountReturnsEmpty() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("logreader_test_\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try "one\ntwo".write(to: tmp, atomically: true, encoding: .utf8)
+
+        let result = LogReader.tail(url: tmp, lines: 0)
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    func testTailRedactsMultipleSecretsOnSameLine() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("logreader_test_\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let content = "Authorization: Bearer sk-first Bearer sk-second api_key=secret1 api_key=secret2"
+        try content.write(to: tmp, atomically: true, encoding: .utf8)
+
+        let result = LogReader.tail(url: tmp, lines: 1, redact: true).joined()
+        XCTAssertFalse(result.contains("sk-first"))
+        XCTAssertFalse(result.contains("sk-second"))
+        XCTAssertFalse(result.contains("secret1"))
+        XCTAssertFalse(result.contains("secret2"))
+    }
 }

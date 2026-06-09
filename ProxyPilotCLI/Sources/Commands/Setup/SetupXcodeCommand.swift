@@ -57,6 +57,19 @@ struct SetupXcodeCommand: AsyncParsableCommand {
         }
 
         let chosenModel = resolvedModel(for: upstreamProvider)
+        if let validationError = ProviderCredentialResolver.validateUpstreamOverride(
+            provider: upstreamProvider,
+            upstreamURL: upstreamUrl
+        ), case .invalidUpstreamURL(let invalidProvider, let url, let reason) = validationError {
+            OutputFormatter.error(
+                command: "setup xcode",
+                code: "E050",
+                message: "Invalid upstream URL override for provider \(invalidProvider.rawValue): \(url)",
+                suggestion: reason,
+                json: json
+            )
+            throw ExitCode.failure
+        }
         let secrets = SecretsProviderFactory.make()
         var authBackend = authBackendInfo(for: secrets)
 
@@ -77,23 +90,38 @@ struct SetupXcodeCommand: AsyncParsableCommand {
             }
         }
 
-        let effectiveBaseURL = upstreamUrl ?? upstreamProvider.defaultAPIBaseURL
-        let resolvedAPIKey: String?
-        if let inlineKey {
-            resolvedAPIKey = inlineKey
-        } else if let secretKeyName = upstreamProvider.secretKey {
-            resolvedAPIKey = ProcessInfo.processInfo.environment[secretKeyName]
-                ?? (try? secrets.get(key: secretKeyName))
-        } else {
-            resolvedAPIKey = nil
-        }
-
-        if resolvedAPIKey == nil && !upstreamProvider.isLocal && !isLocalhostURL(effectiveBaseURL) {
+        switch ProviderCredentialResolver.resolve(
+            rawProvider: upstreamProvider.rawValue,
+            explicitKey: inlineKey,
+            upstreamURL: upstreamUrl,
+            secrets: secrets
+        ) {
+        case .resolved:
+            break
+        case .invalidUpstreamURL(let invalidProvider, let url, let reason):
+            OutputFormatter.error(
+                command: "setup xcode",
+                code: "E050",
+                message: "Invalid upstream URL override for provider \(invalidProvider.rawValue): \(url)",
+                suggestion: reason,
+                json: json
+            )
+            throw ExitCode.failure
+        case .missingAPIKey(let missingProvider, _):
             OutputFormatter.error(
                 command: "setup xcode",
                 code: "E004",
-                message: "No API key found for provider \(upstreamProvider.rawValue).",
-                suggestion: "Pass --key, use --key-stdin, or run 'proxypilot auth set --provider \(upstreamProvider.rawValue)'.",
+                message: "No API key found for provider \(missingProvider.rawValue).",
+                suggestion: "Pass --key, use --key-stdin, or run 'proxypilot auth set --provider \(missingProvider.rawValue)'.",
+                json: json
+            )
+            throw ExitCode.failure
+        case .unknownProvider, .selectionRequired:
+            OutputFormatter.error(
+                command: "setup xcode",
+                code: "E001",
+                message: "Unable to resolve provider \(upstreamProvider.rawValue).",
+                suggestion: "Valid: \(UpstreamProvider.allCases.map(\.rawValue).joined(separator: ", "))",
                 json: json
             )
             throw ExitCode.failure

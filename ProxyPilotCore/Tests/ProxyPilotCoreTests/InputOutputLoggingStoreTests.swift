@@ -212,6 +212,74 @@ final class InputOutputLoggingStoreTests: XCTestCase {
         XCTAssertEqual(decoded, [record])
     }
 
+    func testEncryptedStoreCreatesLogFileWithPrivatePermissions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let logURL = directory.appendingPathComponent("records.jsonl.enc")
+        let store = InputOutputLogStore(
+            url: logURL,
+            encryptionKey: Data(repeating: 7, count: 32)
+        )
+
+        try await store.append(InputOutputLogRecord(
+            timestamp: Date(timeIntervalSince1970: 1_714_000_000),
+            source: "cli",
+            path: "/v1/messages",
+            model: "glm-5",
+            provider: "zai",
+            wasStreaming: false,
+            statusCode: 200,
+            retentionExpiresAt: nil,
+            input: .utf8("prompt"),
+            output: .utf8("output")
+        ))
+
+        XCTAssertEqual(try filePermissions(at: logURL), 0o600)
+    }
+
+    func testEncryptedStoreRewriteRestoresPrivatePermissions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let logURL = directory.appendingPathComponent("records.jsonl.enc")
+        let store = InputOutputLogStore(
+            url: logURL,
+            encryptionKey: Data(repeating: 8, count: 32)
+        )
+        let now = Date(timeIntervalSince1970: 1_714_000_000)
+
+        try await store.append(InputOutputLogRecord(
+            timestamp: now.addingTimeInterval(-7200),
+            source: "gui",
+            path: "/v1/messages",
+            model: "expired",
+            provider: "zai",
+            wasStreaming: false,
+            statusCode: 200,
+            retentionExpiresAt: now.addingTimeInterval(-3600),
+            input: .utf8("old"),
+            output: nil
+        ))
+        try await store.append(InputOutputLogRecord(
+            timestamp: now,
+            source: "gui",
+            path: "/v1/messages",
+            model: "fresh",
+            provider: "zai",
+            wasStreaming: false,
+            statusCode: 200,
+            retentionExpiresAt: now.addingTimeInterval(3600),
+            input: .utf8("new"),
+            output: nil
+        ))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: logURL.path)
+        try await store.pruneExpired(now: now)
+
+        XCTAssertEqual(try filePermissions(at: logURL), 0o600)
+        let records = try await store.readRecords()
+        XCTAssertEqual(records.map(\.model), ["fresh"])
+    }
+
     func testEncryptedStorePrunesExpiredRecords() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -384,6 +452,11 @@ final class InputOutputLoggingStoreTests: XCTestCase {
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records[0].input?.text, "prompt")
         XCTAssertNil(records[0].output)
+    }
+
+    private func filePermissions(at url: URL) throws -> Int {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes[.posixPermissions] as? NSNumber)?.intValue ?? -1
     }
 
     func testRecorderPersistsSessionIdentifierForJoiningToReportHistory() async throws {

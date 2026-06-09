@@ -53,11 +53,22 @@ public enum AnthropicTranslator {
         }
 
         public var isGoogleGemini3: Bool {
-            upstreamProvider == .google && resolvedUpstreamModel.lowercased().hasPrefix("gemini-3")
+            upstreamProvider == .google && normalizedGoogleModelID.hasPrefix("gemini-3")
         }
 
         public var isGoogleGemini25: Bool {
-            upstreamProvider == .google && resolvedUpstreamModel.lowercased().hasPrefix("gemini-2.5")
+            upstreamProvider == .google && normalizedGoogleModelID.hasPrefix("gemini-2.5")
+        }
+
+        private var normalizedGoogleModelID: String {
+            var model = resolvedUpstreamModel
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+
+            for prefix in ["models/", "google/"] where model.hasPrefix(prefix) {
+                model.removeFirst(prefix.count)
+            }
+            return model
         }
     }
 

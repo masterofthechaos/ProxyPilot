@@ -83,19 +83,14 @@ final class ProxyLifecycleManager: ObservableObject {
 
     func startProxy() async {
         onClearIssue?()
-        telemetryTracker?("proxy_start_clicked", ["mode": useBuiltInProxy ? "builtin" : "litellm"])
+        telemetryTracker?("proxy_start_clicked", ["mode": "builtin"])
 
         do {
-            if useBuiltInProxy {
-                try startBuiltInProxy()
-                try await validateBuiltInProxyCameUp()
-            } else {
-                try await proxyService.start()
-                try await validateProxyCameUp()
-            }
+            try startBuiltInProxy()
+            try await validateBuiltInProxyCameUp()
             expectedProxyRunning = true
             recoveryState = .monitoring
-            telemetryTracker?("proxy_start_succeeded", ["mode": useBuiltInProxy ? "builtin" : "litellm"])
+            telemetryTracker?("proxy_start_succeeded", ["mode": "builtin"])
         } catch {
             expectedProxyRunning = false
             recoveryState = .idle
@@ -117,14 +112,9 @@ final class ProxyLifecycleManager: ObservableObject {
         recoveryTask?.cancel()
         recoveryTask = nil
         do {
-            if useBuiltInProxy {
-                try stopBuiltInProxyIfRunning()
-                try startBuiltInProxy()
-                try await validateBuiltInProxyCameUp()
-            } else {
-                try await proxyService.restart()
-                try await validateProxyCameUp()
-            }
+            try stopBuiltInProxyIfRunning()
+            try startBuiltInProxy()
+            try await validateBuiltInProxyCameUp()
             expectedProxyRunning = true
             recoveryState = .monitoring
         } catch {
@@ -148,11 +138,7 @@ final class ProxyLifecycleManager: ObservableObject {
         recoveryTask = nil
 
         do {
-            if useBuiltInProxy {
-                try stopBuiltInProxyIfRunning()
-            } else {
-                try await proxyService.stop()
-            }
+            try stopBuiltInProxyIfRunning()
         } catch {
             let issue = issueFor(
                 error,
@@ -191,14 +177,9 @@ final class ProxyLifecycleManager: ObservableObject {
                 self.recoveryState = state
             }, operation: { _ in
                 do {
-                    if self.useBuiltInProxy {
-                        try self.stopBuiltInProxyIfRunning()
-                        try self.startBuiltInProxy()
-                        try await self.validateBuiltInProxyCameUp()
-                    } else {
-                        try await self.proxyService.restart()
-                        try await self.validateProxyCameUp()
-                    }
+                    try self.stopBuiltInProxyIfRunning()
+                    try self.startBuiltInProxy()
+                    try await self.validateBuiltInProxyCameUp()
                     self.expectedProxyRunning = true
                     self.onRefreshStatus?()
                     return true
@@ -251,7 +232,7 @@ final class ProxyLifecycleManager: ObservableObject {
         healthMonitor.start(
             isRunning: { [weak self] in
                 guard let self else { return false }
-                return self.useBuiltInProxy ? self.localProxyServer.state.isRunning : self.proxyService.isRunning()
+                return self.localProxyServer.state.isRunning
             },
             onUnexpectedStop: { [weak self] in
                 guard let self else { return }
@@ -336,36 +317,6 @@ final class ProxyLifecycleManager: ObservableObject {
                 code: .generic,
                 title: String(localized: "Built-In Proxy Did Not Start"),
                 message: String(localized: "Built-in proxy did not start. Status:") + " " + status,
-                actions: [.runPreflight, .exportDiagnostics]
-            ))
-        }
-    }
-
-    private func validateProxyCameUp() async throws {
-        guard let validator = proxyURLValidator else {
-            preconditionFailure("proxyURLValidator must be set before calling validateProxyCameUp()")
-        }
-        let baseURL = try validator(false).url
-
-        try? await Task.sleep(nanoseconds: 450_000_000)
-
-        do {
-            _ = try await proxyService.probe(baseURL: baseURL)
-        } catch {
-            let tail = proxyService.readLogTail()
-            if tail.isEmpty {
-                throw IssueError(issue: AppIssue(
-                    code: .generic,
-                    title: String(localized: "Proxy Did Not Start"),
-                    message: String(localized: "Proxy did not respond on") + " " + baseURL.absoluteString + ".",
-                    actions: [.runPreflight, .exportDiagnostics]
-                ))
-            }
-
-            throw IssueError(issue: AppIssue(
-                code: .generic,
-                title: String(localized: "Proxy Did Not Start"),
-                message: String(localized: "Proxy did not start. Check logs in the Log section for details."),
                 actions: [.runPreflight, .exportDiagnostics]
             ))
         }

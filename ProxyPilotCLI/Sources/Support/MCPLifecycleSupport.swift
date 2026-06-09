@@ -35,16 +35,65 @@ enum MCPStopResponsePlanner {
         }
 
         return MCPStopPlan(
-            text: "ProxyPilot stopped. Xcode config is still installed — call xcode_config_remove if you want to restore direct Anthropic routing.",
-            nextActions: [
-                NextAction(
-                    id: "remove_xcode_config",
-                    kind: .mcpTool,
-                    tool: "xcode_config_remove",
-                    message: "Xcode config can still point at a stopped proxy.",
-                    destructive: true
-                ),
-            ]
+            text: "ProxyPilot stopped. Xcode config is still installed — remove it only after the user explicitly confirms they want direct Anthropic routing restored.",
+            nextActions: [MCPXcodeConfigConsent.removeNextAction()]
+        )
+    }
+}
+
+enum MCPXcodeConfigConsent {
+    static let environmentVariable = "PROXYPILOT_MCP_ALLOW_XCODE_CONFIG"
+    static let argumentName = "allow_xcode_config_write"
+
+    static var environmentAllowsWrites: Bool {
+        guard let raw = ProcessInfo.processInfo.environment[environmentVariable]?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else {
+            return false
+        }
+        return ["1", "true", "yes", "allow"].contains(raw)
+    }
+
+    static func installNextAction(port: UInt16) -> NextAction {
+        if environmentAllowsWrites {
+            return NextAction(
+                id: "install_xcode_config",
+                kind: .mcpTool,
+                tool: "xcode_config_install",
+                arguments: [
+                    "port": .int(Int(port)),
+                    argumentName: .bool(true),
+                ],
+                message: "Only run after the user explicitly confirms this persistent Xcode Agent routing change.",
+                destructive: true
+            )
+        }
+
+        return NextAction(
+            id: "authorize_xcode_config_install",
+            kind: .user,
+            command: "\(environmentVariable)=1 proxypilot serve --mcp",
+            message: "Ask the user to authorize Xcode Agent config writes before installing routing config. They can either run `proxypilot config install` themselves or restart MCP with PROXYPILOT_MCP_ALLOW_XCODE_CONFIG=1, then approve a call with allow_xcode_config_write: true.",
+            destructive: true
+        )
+    }
+
+    static func removeNextAction() -> NextAction {
+        if environmentAllowsWrites {
+            return NextAction(
+                id: "remove_xcode_config",
+                kind: .mcpTool,
+                tool: "xcode_config_remove",
+                arguments: [argumentName: .bool(true)],
+                message: "Only run after the user explicitly confirms this persistent Xcode Agent routing change.",
+                destructive: true
+            )
+        }
+
+        return NextAction(
+            id: "authorize_xcode_config_remove",
+            kind: .user,
+            command: "\(environmentVariable)=1 proxypilot serve --mcp",
+            message: "Ask the user to authorize Xcode Agent config writes before removing routing config. They can either run `proxypilot config remove` themselves or restart MCP with PROXYPILOT_MCP_ALLOW_XCODE_CONFIG=1, then approve a call with allow_xcode_config_write: true.",
+            destructive: true
         )
     }
 }

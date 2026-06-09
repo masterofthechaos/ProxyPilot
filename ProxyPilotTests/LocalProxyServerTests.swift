@@ -816,6 +816,41 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(permissions.intValue & 0o777, 0o600)
     }
 
+    // MARK: - Listener loopback bind regression guard
+    //
+    // Regression context: commit 52aa0c7 (v1.10.0 triadic audit) tried to enforce
+    // loopback binding by setting `params.requiredLocalEndpoint = .hostPort(...)`.
+    // That approach raised EINVAL at `NWListener(using:on:)` construction whenever
+    // the endpoint port matched the configured port — the listener never started.
+    // Commit d66ec03 removed the broken line as collateral while restoring the
+    // local-password feature; the proxy started again but no OS-level loopback
+    // constraint remained — only the in-process `isLoopbackClientEndpoint` guard
+    // still rejected non-loopback client endpoints at the app layer.
+    //
+    // v1.10.2 enforces loopback at the OS layer via `requiredInterfaceType = .loopback`,
+    // the canonical Apple mechanism that restricts the listener to lo0 without
+    // conflicting with the `on: port` argument. Parameter construction is extracted
+    // into `makeListenerParameters` so the wiring is unit-testable. The end-to-end
+    // `testBuiltInProxyRejectsNonLoopbackClients` below is a known blind spot for
+    // this regression class — the app-level guard masks listener-binding misconfig.
+    // The test below pins the OS-layer constraint directly.
+
+    func testMakeListenerParametersConstrainsListenerToLoopbackInterface() {
+        let params = LocalProxyServer.makeListenerParameters()
+        XCTAssertEqual(
+            params.requiredInterfaceType,
+            .loopback,
+            "requiredInterfaceType must be .loopback so NWListener only accepts connections arriving via lo0. Regression guard against silent removal."
+        )
+    }
+
+    func testLoopbackBindHostNormalizesAliasesToIPv4Loopback() {
+        XCTAssertEqual(LocalProxyServer.loopbackBindHost(from: "localhost"), "127.0.0.1")
+        XCTAssertEqual(LocalProxyServer.loopbackBindHost(from: "::1"), "127.0.0.1")
+        XCTAssertEqual(LocalProxyServer.loopbackBindHost(from: ""), "127.0.0.1")
+        XCTAssertEqual(LocalProxyServer.loopbackBindHost(from: "127.0.0.1"), "127.0.0.1")
+    }
+
     // MARK: - Config.isLocalhostUpstream (via the struct)
 
     func testBuiltInProxyRejectsNonLoopbackClients() async throws {
@@ -934,6 +969,63 @@ final class LocalProxyServerTests: XCTestCase {
             googleThoughtSignatureStore: nil
         )
         XCTAssertTrue(config.requiresUpstreamAPIKey)
+    }
+
+    func testProtectedRoutesStayCompatibleWhenUpstreamCredentialIsPresentAndAuthDisabled() {
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: 4000,
+            masterKey: "test",
+            upstreamProvider: .zAI,
+            upstreamAPIBase: URL(string: "https://api.z.ai/api/coding/paas/v4")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["glm-5"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "glm-5",
+            googleThoughtSignatureStore: nil
+        )
+
+        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
+    }
+
+    func testProtectedRoutesRequireAuthWhenLocalAuthEnabled() {
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: 4000,
+            masterKey: "test",
+            upstreamProvider: .zAI,
+            upstreamAPIBase: URL(string: "https://api.z.ai/api/coding/paas/v4")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["glm-5"],
+            requiresAuth: true,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "glm-5",
+            googleThoughtSignatureStore: nil
+        )
+
+        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
+    }
+
+    func testLocalNoAuthCompatibilityRemainsWhenNoUpstreamCredentialIsPresent() {
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: 4000,
+            masterKey: "test",
+            upstreamProvider: .ollama,
+            upstreamAPIBase: URL(string: "http://localhost:11434/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: ["llama3"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "llama3",
+            googleThoughtSignatureStore: nil
+        )
+
+        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
     }
 
     func testDeepSeekUsesAnthropicPassthroughByDefault() {

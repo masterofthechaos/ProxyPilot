@@ -18,6 +18,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // Accumulated request state (reset after each .end)
     private var requestHead: HTTPRequestHead?
     private var requestBody: ByteBuffer?
+    private var requestBodyRejected = false
 
     init(config: ProxyConfiguration) {
         self.config = config
@@ -30,11 +31,29 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         case .head(let head):
             requestHead = head
             requestBody = context.channel.allocator.buffer(capacity: 0)
+            requestBodyRejected = false
+
+            if declaredContentLengthExceedsLimit(head) {
+                rejectOversizedRequest(context: context)
+            }
 
         case .body(var body):
+            guard !requestBodyRejected else { return }
+
+            let accumulatedBytes = requestBody?.readableBytes ?? 0
+            if body.readableBytes > config.maxRequestBodyBytes - accumulatedBytes {
+                rejectOversizedRequest(context: context)
+                return
+            }
+
             requestBody?.writeBuffer(&body)
 
         case .end:
+            guard !requestBodyRejected else {
+                resetRequestState()
+                return
+            }
+
             guard let head = requestHead else {
                 context.close(promise: nil)
                 return
@@ -43,13 +62,37 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             handleRequest(context: context, head: head, body: requestBody)
 
             // Reset for next request on this connection (keep-alive)
-            requestHead = nil
-            requestBody = nil
+            resetRequestState()
         }
     }
 
     func channelReadComplete(context: ChannelHandlerContext) {
         context.flush()
+    }
+
+    private func declaredContentLengthExceedsLimit(_ head: HTTPRequestHead) -> Bool {
+        guard let value = head.headers["Content-Length"].first,
+              let contentLength = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return false
+        }
+        return contentLength > config.maxRequestBodyBytes
+    }
+
+    private func rejectOversizedRequest(context: ChannelHandlerContext) {
+        requestBodyRejected = true
+        sendErrorResponse(
+            context: context,
+            status: .payloadTooLarge,
+            message: "Request body exceeds maximum size of \(config.maxRequestBodyBytes) bytes"
+        )
+        context.flush()
+        context.close(promise: nil)
+    }
+
+    private func resetRequestState() {
+        requestHead = nil
+        requestBody = nil
+        requestBodyRejected = false
     }
 
     // MARK: - Request Routing
@@ -156,6 +199,12 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        if let requestedModel = anthropicRequest["model"] as? String,
+           !ModelFilter.isAllowed(requestedModel, in: config.allowedModels) {
+            sendErrorResponse(context: context, status: .badRequest, message: "Model not allowed")
+            return
+        }
+
         let isStreaming = anthropicRequest["stream"] as? Bool == true
         let headers: [(String, String)] = head.headers.map { ($0.name, $0.value) }
         let ctxBox = UnsafeSendableBox(value: context)
@@ -189,6 +238,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 masterKey: config.masterKey,
                 allowedModels: config.allowedModels,
                 requiresAuth: config.requiresAuth,
+                maxRequestBodyBytes: config.maxRequestBodyBytes,
                 anthropicTranslatorMode: config.anthropicTranslatorMode,
                 miniMaxRoutingMode: config.miniMaxRoutingMode,
                 preferredAnthropicUpstreamModel: config.preferredAnthropicUpstreamModel,
@@ -792,9 +842,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         let isStreaming = HTTPRequestParser.isStreamingRequest(body: bodyData)
+        let parsedRequestModel = HTTPRequestParser.extractModel(from: bodyData)
+        if let parsedRequestModel,
+           !ModelFilter.isAllowed(parsedRequestModel, in: config.allowedModels) {
+            sendErrorResponse(context: context, status: .badRequest, message: "Model not allowed")
+            return
+        }
+
         let sanitizedBody = withStreamingUsageInjected(sanitizedChatRequestBody(bodyData))
-        let requestModel = HTTPRequestParser.extractModel(from: bodyData)
-            ?? config.preferredAnthropicUpstreamModel
+        let requestModel = parsedRequestModel ?? config.preferredAnthropicUpstreamModel
 
         // Collect headers as tuples
         let headers: [(String, String)] = head.headers.map { ($0.name, $0.value) }

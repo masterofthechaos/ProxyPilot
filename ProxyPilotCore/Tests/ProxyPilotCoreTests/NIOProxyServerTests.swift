@@ -4,6 +4,7 @@ import NIOCore
 import NIOPosix
 import NIOHTTP1
 import NIOConcurrencyHelpers
+import NIOEmbedded
 @testable import ProxyPilotCore
 
 /// A tiny HTTP server that returns a fixed status code for any request.
@@ -194,6 +195,15 @@ struct NIOProxyServerTests {
         try await server.stop()
     }
 
+    @Test func serverRejectsNonLoopbackBindHost() async throws {
+        let config = ProxyConfiguration(host: "0.0.0.0", port: 0)
+        let server = NIOProxyServer()
+
+        await #expect(throws: ProxyEngineError.self) {
+            try await server.start(config: config)
+        }
+    }
+
     @Test func serverReturns404ForUnknownPath() async throws {
         let config = ProxyConfiguration(port: 0)
         let server = NIOProxyServer()
@@ -244,6 +254,61 @@ struct NIOProxyServerTests {
         try await server.stop()
     }
 
+    // MARK: - Request Body Limits
+
+    @Test func oversizedContentLengthIsRejectedBeforeBodyBuffering() throws {
+        let config = ProxyConfiguration(port: 0, maxRequestBodyBytes: 8)
+        let channel = EmbeddedChannel(handler: HTTPHandler(config: config))
+        var headers = HTTPHeaders()
+        headers.add(name: "Content-Length", value: "9")
+        let head = HTTPRequestHead(
+            version: .http1_1,
+            method: .POST,
+            uri: "/v1/chat/completions",
+            headers: headers
+        )
+
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+
+        let response = try #require(try channel.readOutbound(as: HTTPServerResponsePart.self))
+        guard case .head(let responseHead) = response else {
+            Issue.record("Expected response head for oversized request")
+            return
+        }
+        #expect(responseHead.status == .payloadTooLarge)
+        while try channel.readOutbound(as: HTTPServerResponsePart.self) != nil {}
+        #expect(try channel.finish(acceptAlreadyClosed: true).isClean)
+    }
+
+    @Test func oversizedChunkedBodyIsRejectedBeforeExceedingLimit() throws {
+        let config = ProxyConfiguration(port: 0, maxRequestBodyBytes: 8)
+        let channel = EmbeddedChannel(handler: HTTPHandler(config: config))
+        let head = HTTPRequestHead(
+            version: .http1_1,
+            method: .POST,
+            uri: "/v1/chat/completions"
+        )
+        var firstChunk = channel.allocator.buffer(capacity: 5)
+        firstChunk.writeString("12345")
+        var secondChunk = channel.allocator.buffer(capacity: 4)
+        secondChunk.writeString("6789")
+
+        try channel.writeInbound(HTTPServerRequestPart.head(head))
+        try channel.writeInbound(HTTPServerRequestPart.body(firstChunk))
+        #expect(try channel.readOutbound(as: HTTPServerResponsePart.self) == nil)
+
+        try channel.writeInbound(HTTPServerRequestPart.body(secondChunk))
+
+        let response = try #require(try channel.readOutbound(as: HTTPServerResponsePart.self))
+        guard case .head(let responseHead) = response else {
+            Issue.record("Expected response head for oversized chunked request")
+            return
+        }
+        #expect(responseHead.status == .payloadTooLarge)
+        while try channel.readOutbound(as: HTTPServerResponsePart.self) != nil {}
+        #expect(try channel.finish(acceptAlreadyClosed: true).isClean)
+    }
+
     // MARK: - Chat Completions Forwarding
 
     @Test func chatCompletionsForwardsUpstreamResponse() async throws {
@@ -281,6 +346,76 @@ struct NIOProxyServerTests {
         let capturedRequest = try #require(stub.requests().first)
         #expect(capturedRequest.headerValue("Content-Type") == "application/json")
         #expect(capturedRequest.headerValue("Accept") == "application/json")
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
+    @Test func chatCompletionsRejectsDisallowedModelBeforeForwarding() async throws {
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: "{\"id\":\"chatcmpl-should-not-forward\"}"
+        )
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
+            allowedModels: ["allowed-model"],
+            requiresAuth: false
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "disallowed-model",
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let httpResponse = response as! HTTPURLResponse
+        #expect(httpResponse.statusCode == 400)
+        #expect(String(decoding: data, as: UTF8.self).contains("Model not allowed"))
+        #expect(stub.requests().isEmpty)
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
+    @Test func streamingChatCompletionsRejectsDisallowedModelBeforeForwarding() async throws {
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: "data: {\"choices\":[{\"delta\":{\"content\":\"nope\"}}]}\n\ndata: [DONE]\n\n",
+            contentType: "text/event-stream"
+        )
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
+            allowedModels: ["allowed-model"],
+            requiresAuth: false
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "disallowed-model",
+            "messages": [["role": "user", "content": "hi"]],
+            "stream": true
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let httpResponse = response as! HTTPURLResponse
+        #expect(httpResponse.statusCode == 400)
+        #expect(String(decoding: data, as: UTF8.self).contains("Model not allowed"))
+        #expect(stub.requests().isEmpty)
 
         try await server.stop()
         try await stub.stop()
@@ -770,6 +905,39 @@ struct NIOProxyServerTests {
         #expect(httpResponse.statusCode == 502)
 
         try await server.stop()
+    }
+
+    @Test func anthropicMessagesRejectsDisallowedModelBeforeForwarding() async throws {
+        let stub = StubUpstream()
+        let stubPort = try await stub.start(statusCode: 200, body: "{\"id\":\"should-not-forward\"}")
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(stubPort)",
+            allowedModels: ["allowed-model"],
+            requiresAuth: false,
+            preferredAnthropicUpstreamModel: "allowed-model"
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "disallowed-model",
+            "max_tokens": 100,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let httpResponse = response as! HTTPURLResponse
+        #expect(httpResponse.statusCode == 400)
+        #expect(String(decoding: data, as: UTF8.self).contains("Model not allowed"))
+        #expect(stub.requests().isEmpty)
+
+        try await server.stop()
+        try await stub.stop()
     }
 
     @Test func anthropicMessagesTranslatesResponseFormat() async throws {

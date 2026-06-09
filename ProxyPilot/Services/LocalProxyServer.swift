@@ -100,6 +100,10 @@ final class LocalProxyServer: @unchecked Sendable {
             upstreamProvider.requiresAPIKey && !isLocalhostUpstream
         }
 
+        var requiresAuthForProtectedRoutes: Bool {
+            requiresAuth
+        }
+
         var upstreamAPIBaseURL: String {
             upstreamAPIBase.absoluteString
         }
@@ -142,10 +146,9 @@ final class LocalProxyServer: @unchecked Sendable {
             reportCard.reset()
         }
 
-        let params = NWParameters.tcp
-        params.allowLocalEndpointReuse = true
-
+        let bindHost = Self.loopbackBindHost(from: config.host)
         let port = NWEndpoint.Port(rawValue: config.port) ?? .init(integerLiteral: 4000)
+        let params = Self.makeListenerParameters()
 
         do {
             let newListener = try NWListener(using: params, on: port)
@@ -219,7 +222,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 preferredModel: config.preferredAnthropicUpstreamModel,
                 upstreamBaseURL: config.upstreamAPIBaseURL
             ))
-            appendLog("starting on \(config.host):\(config.port) loopback_only=true")
+            appendLog("starting on \(bindHost):\(config.port) loopback_only=true")
             newListener.start(queue: queue)
         } catch {
             throw ServerError.bindFailed(error.localizedDescription)
@@ -387,8 +390,8 @@ final class LocalProxyServer: @unchecked Sendable {
             return
         }
 
-        // Auth check for non-models routes
-        if config.requiresAuth, !isAuthorized(headers: headers, config: config) {
+        // Auth check for non-models routes when local auth is explicitly enabled.
+        if config.requiresAuthForProtectedRoutes, !isAuthorized(headers: headers, config: config) {
             respond(
                 connection: connection,
                 status: 401,
@@ -1626,6 +1629,19 @@ final class LocalProxyServer: @unchecked Sendable {
             "Connection: keep-alive\r\n" +
             "\r\n"
         await sendData(Data(headers.utf8), on: connection)
+    }
+
+    static func loopbackBindHost(from configuredHost: String) -> String {
+        let host = configuredHost.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if host == "localhost" || host == "::1" { return "127.0.0.1" }
+        return host.isEmpty ? "127.0.0.1" : host
+    }
+
+    static func makeListenerParameters() -> NWParameters {
+        let params = NWParameters.tcp
+        params.allowLocalEndpointReuse = true
+        params.requiredInterfaceType = .loopback
+        return params
     }
 
     private func isAuthorized(headers: [String: String], config: Config) -> Bool {

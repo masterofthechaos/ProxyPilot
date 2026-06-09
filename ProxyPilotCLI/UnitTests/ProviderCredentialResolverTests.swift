@@ -180,6 +180,130 @@ struct ProviderCredentialResolverTests {
         #expect(credential.apiKey == nil)
         #expect(credential.secretKeyName == SecretKey.nineRouterAPIKey)
     }
+
+    @Test func remoteOverrideRejectsStoredProviderKey() throws {
+        let secrets = MemorySecretsProvider(values: [SecretKey.openAIAPIKey: "stored-openai-key"])
+
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: "openai",
+            explicitKey: nil,
+            upstreamURL: "https://attacker.example/v1",
+            secrets: secrets,
+            environment: [:]
+        )
+
+        guard case .invalidUpstreamURL(let provider, let url, let reason) = resolution else {
+            Issue.record("Expected remote override to be rejected before reading stored OpenAI auth.")
+            return
+        }
+        #expect(provider == .openAI)
+        #expect(url == "https://attacker.example/v1")
+        #expect(reason.contains("localhost"))
+        #expect(reason.contains("official API base URL"))
+    }
+
+    @Test func localhostOverrideDoesNotReuseStoredProviderKey() throws {
+        let secrets = MemorySecretsProvider(values: [SecretKey.openAIAPIKey: "stored-openai-key"])
+
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: "openai",
+            explicitKey: nil,
+            upstreamURL: "http://127.0.0.1:11434/v1",
+            secrets: secrets,
+            environment: [:]
+        )
+
+        guard case .resolved(let credential) = resolution else {
+            Issue.record("Expected localhost override to remain available without cloud credentials.")
+            return
+        }
+        #expect(credential.provider == .openAI)
+        #expect(credential.apiKey == nil)
+    }
+
+    @Test func officialOverrideCanUseStoredProviderKey() throws {
+        let secrets = MemorySecretsProvider(values: [SecretKey.openAIAPIKey: "stored-openai-key"])
+
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: "openai",
+            explicitKey: nil,
+            upstreamURL: "https://api.openai.com/v1/",
+            secrets: secrets,
+            environment: [:]
+        )
+
+        guard case .resolved(let credential) = resolution else {
+            Issue.record("Expected official OpenAI override to use the stored OpenAI key.")
+            return
+        }
+        #expect(credential.provider == .openAI)
+        #expect(credential.apiKey == "stored-openai-key")
+    }
+
+    @Test func localProviderPrivateNetworkOverrideRemainsAllowedWithoutStoredKeyReuse() throws {
+        let secrets = MemorySecretsProvider(values: [SecretKey.nineRouterAPIKey: "stored-router-key"])
+
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: "9router",
+            explicitKey: nil,
+            upstreamURL: "http://192.168.1.50:20128/v1",
+            secrets: secrets,
+            environment: [:]
+        )
+
+        guard case .resolved(let credential) = resolution else {
+            Issue.record("Expected private-network local provider override to remain available.")
+            return
+        }
+        #expect(credential.provider == .nineRouter)
+        #expect(credential.apiKey == nil)
+    }
+
+    @Test func nonHTTPSchemeOverrideIsRejected() throws {
+        let secrets = MemorySecretsProvider(values: [SecretKey.openAIAPIKey: "stored-openai-key"])
+
+        let resolution = ProviderCredentialResolver.resolve(
+            rawProvider: "openai",
+            explicitKey: nil,
+            upstreamURL: "file:///tmp/fake/v1",
+            secrets: secrets,
+            environment: [:]
+        )
+
+        guard case .invalidUpstreamURL(let provider, _, let reason) = resolution else {
+            Issue.record("Expected non-HTTP(S) upstream override to be rejected.")
+            return
+        }
+        #expect(provider == .openAI)
+        #expect(reason.contains("HTTP(S) URL"))
+    }
+
+    @Test func upstreamOverrideRejectsUserinfoQueryAndFragment() throws {
+        let secrets = MemorySecretsProvider(values: [SecretKey.openAIAPIKey: "stored-openai-key"])
+        let unsafeURLs = [
+            "https://user:secret@api.openai.com/v1",
+            "https://api.openai.com/v1?target=https://attacker.example",
+            "https://api.openai.com/v1#https://attacker.example",
+        ]
+
+        for unsafeURL in unsafeURLs {
+            let resolution = ProviderCredentialResolver.resolve(
+                rawProvider: "openai",
+                explicitKey: nil,
+                upstreamURL: unsafeURL,
+                secrets: secrets,
+                environment: [:]
+            )
+
+            guard case .invalidUpstreamURL(let provider, let url, let reason) = resolution else {
+                Issue.record("Expected unsafe override to be rejected: \(unsafeURL)")
+                continue
+            }
+            #expect(provider == .openAI)
+            #expect(url == unsafeURL)
+            #expect(reason.contains("userinfo, query, or fragment"))
+        }
+    }
 }
 
 private struct MemorySecretsProvider: SecretsProvider {
