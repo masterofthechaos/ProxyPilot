@@ -17,6 +17,19 @@ final class AppViewModel: ObservableObject {
         case portOccupied(statusCode: Int)
     }
 
+    enum AgentMode: String, CaseIterable, Identifiable {
+        case claudeAgent
+        case proxyPilotAgent
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .claudeAgent: "Claude Agent"
+            case .proxyPilotAgent: "ProxyPilot Agent"
+            }
+        }
+    }
+
     enum XcodeVisibleModelsSource: String, Equatable {
         case notChecked
         case runningProxy
@@ -69,11 +82,13 @@ final class AppViewModel: ObservableObject {
     // autoRestartEnabled defaults key: kept here for resetToFreshInstall cleanup
     private static let autoRestartEnabledDefaultsKey = "proxypilot.autoRestartEnabled"
     private static let requireLocalAuthDefaultsKey = "proxypilot.requireLocalAuth"
+    private static let runInBackgroundDefaultsKey = "proxypilot.runInBackground"
     private static let preflightSnapshotDefaultsKey = "proxypilot.lastPreflightSnapshot"
     private static let suppressKeychainPrimerDefaultsKey = "proxypilot.suppressKeychainPrimer"
     private static let analyticsPromptShownVersionKey = "proxypilot.analyticsPromptShownVersion"
     private static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
     private static let xcodeAgentAPIKeyOverrideDefaultsKey = "IDEChatClaudeAgentAPIKeyOverride"
+    private static let selectedAgentModeDefaultsKey = "proxypilot.agentModes.selectedMode"
 
     private static let builtInProxyLogFileURL = URL(fileURLWithPath: "/tmp/proxypilot_builtin_proxy.log")
     private static let toolchainLogFileURL = URL(fileURLWithPath: "/tmp/proxypilot_toolchain.log")
@@ -99,6 +114,11 @@ final class AppViewModel: ObservableObject {
     private let copilotSidecarService: CopilotSidecarService
     private let xcodeAgentConfigStateProvider: (() -> Bool)?
     private let xcodeDetectionService = XcodeDetectionService()
+    private let agentRuntimeManager: AgentRuntimeManager
+    private let agentLinkManager: AgentExecutableLinkManager
+    private let agentRegistrationManager: ACPRegistrationManager
+    private let agentRuntimeInstaller: AgentRuntimeInstaller
+    private let agentHelperResolver: AgentHelperResolver
     private let cliExecutableResolver: CLIExecutableResolver?
     private let cliUpdateRunner: CLIUpdateRunner?
     private let cliAuthStatusRunner: CLIAuthStatusRunner?
@@ -109,6 +129,8 @@ final class AppViewModel: ObservableObject {
     typealias CLIUpdateRunner = (URL) async throws -> CLIUpdateExecutionResult
     typealias CLIAuthStatusRunner = (URL, UpstreamProvider) async throws -> CLIUpdateExecutionResult
     typealias CLIStopRunner = (URL, UInt16) async throws -> CLIUpdateExecutionResult
+    typealias AgentRuntimeInstaller = @Sendable (AgentRuntimeManager) async throws -> AgentRuntimeManifest
+    typealias AgentHelperResolver = () -> (launcher: URL, cli: URL)?
 
     struct CLIUpdateExecutionResult: Sendable {
         let terminationStatus: Int32
@@ -190,7 +212,9 @@ final class AppViewModel: ObservableObject {
         customProviderXcodeAgentModelKeyPrefix + id.uuidString
     }
 
-    @Published var proxyURLString: String = AppViewModel.defaultProxyURLString
+    @Published var proxyURLString: String = AppViewModel.defaultProxyURLString {
+        didSet { persistAgentLaunchSettings() }
+    }
 
     var upstreamAPIBaseURLString: String {
         get { activeCustomProvider?.apiBaseURL ?? providerManager.upstreamAPIBaseURLString }
@@ -202,6 +226,7 @@ final class AppViewModel: ObservableObject {
             } else {
                 providerManager.upstreamAPIBaseURLString = newValue
             }
+            persistAgentLaunchSettings()
         }
     }
 
@@ -210,6 +235,7 @@ final class AppViewModel: ObservableObject {
         set {
             setActiveCustomProviderID(nil)
             providerManager.upstreamProvider = newValue
+            persistAgentLaunchSettings()
         }
     }
 
@@ -344,6 +370,7 @@ final class AppViewModel: ObservableObject {
 
     @Published var launchAtLogin: Bool = false
     @Published private(set) var sessionHistorySessions: [SessionHistorySession] = []
+    @Published private(set) var allTimeUsage: AllTimeUsage = .empty
     @Published private(set) var sessionHistoryLoadError: String?
 
     var localProxyState: LocalProxyState { localProxyServer.state }
@@ -405,20 +432,59 @@ final class AppViewModel: ObservableObject {
     func refreshSessionHistory() async {
         do {
             let sessionReportURL = sessionReportURL
-            let sessions = try await Task.detached(priority: .userInitiated) {
+            let result = try await Task.detached(priority: .userInitiated) {
                 let events = try SessionReportStore.readEvents(from: sessionReportURL)
-                return SessionHistorySession.build(from: events)
+                return (
+                    sessions: SessionHistorySession.build(from: events),
+                    allTimeUsage: AllTimeUsage.build(from: events)
+                )
             }.value
+            let sessions = result.sessions
             sessionHistorySessions = sessions
+            allTimeUsage = result.allTimeUsage
             sessionHistoryLoadError = nil
         } catch {
             sessionHistorySessions = []
+            allTimeUsage = .empty
             sessionHistoryLoadError = error.localizedDescription
         }
     }
 
     @Published var xcodeInstallations: [XcodeInstallation] = []
     var hasCompatibleXcode: Bool { xcodeInstallations.contains { $0.supportsAgenticCoding } }
+    @Published private(set) var agentModesCapability = XcodeDetectionService.agentModesCapability(for: [])
+    @Published private(set) var agentRuntimeStatus: AgentRuntimeStatus = .notInstalled
+    @Published private(set) var proxyPilotAgentRegistrationStatus: ACPRegistrationManager.Status?
+    @Published private(set) var proxyPilotAgentStatusText = "Not installed"
+    @Published private(set) var isInstallingProxyPilotAgent = false
+    @Published var selectedAgentMode: AgentMode = .claudeAgent {
+        didSet { defaults.set(selectedAgentMode.rawValue, forKey: Self.selectedAgentModeDefaultsKey) }
+    }
+
+    var showsAgentModeChoice: Bool {
+        agentModesCapability.proxyPilotAgent.showsProxyPilotAgentControls
+    }
+
+    var proxyPilotAgentUsesManualRegistration: Bool {
+        if case .manualRegistration = agentModesCapability.proxyPilotAgent { return true }
+        return false
+    }
+
+    var proxyPilotAgentCapabilityText: String {
+        switch agentModesCapability.proxyPilotAgent {
+        case .hidden:
+            return "Claude Agent remains available on this Mac."
+        case .automaticRegistration(let xcode):
+            return "Automatic setup is proven for Xcode \(xcode.versionString), build \(xcode.build ?? "unknown")."
+        case .manualRegistration(let xcode, let reason):
+            switch reason {
+            case .buildNotDetected:
+                return "Xcode \(xcode.versionString) supports Agent Modes, but its build could not be verified. ProxyPilot will prepare the runtime and guide manual registration."
+            case .buildNotProven(let build):
+                return "Xcode \(xcode.versionString) build \(build) is not yet proven for automatic registration. ProxyPilot will prepare the runtime and guide manual registration."
+            }
+        }
+    }
 
     var hasUpstreamKey: Bool {
         if let provider = activeCustomProvider {
@@ -686,6 +752,7 @@ final class AppViewModel: ObservableObject {
             } else {
                 providerManager.selectedXcodeAgentModel = newValue
             }
+            persistAgentLaunchSettings()
         }
     }
 
@@ -751,6 +818,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.copilotSidecarExpandedDefaultsKey)
         defaults.removeObject(forKey: Self.autoRestartEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.requireLocalAuthDefaultsKey)
+        defaults.removeObject(forKey: Self.runInBackgroundDefaultsKey)
         defaults.removeObject(forKey: Self.preflightSnapshotDefaultsKey)
         defaults.removeObject(forKey: ProviderManager.showModelMetadataDefaultsKey)
         defaults.removeObject(forKey: ProviderManager.exactoFilterDefaultsKey)
@@ -827,6 +895,7 @@ final class AppViewModel: ObservableObject {
         appearancePreference = .system
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = true
+        runInBackground = false
         menuBarSectionOrder = MenuBarSection.defaultOrder
         visibleMenuBarSections = Set(MenuBarSection.defaultOrder)
         visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
@@ -856,6 +925,11 @@ final class AppViewModel: ObservableObject {
         diagnosticsArchivePath = ""
         supportSummary = ""
         xcodeInstallations = []
+        selectedAgentMode = .claudeAgent
+        agentModesCapability = XcodeDetectionService.agentModesCapability(for: [])
+        agentRuntimeStatus = .notInstalled
+        proxyPilotAgentRegistrationStatus = nil
+        proxyPilotAgentStatusText = "Not installed"
         agentConfigStatus = ""
         preflightResults = []
         preflightLastRun = nil
@@ -1205,6 +1279,7 @@ final class AppViewModel: ObservableObject {
     @Published var promptCachingMode: PromptCachingMode = .computeCacheHints {
         didSet {
             defaults.set(promptCachingMode.rawValue, forKey: Self.promptCachingModeDefaultsKey)
+            persistAgentLaunchSettings()
         }
     }
 
@@ -1257,6 +1332,8 @@ final class AppViewModel: ObservableObject {
                 return "MiniMax cache_control applies when Anthropic Passthrough routing is selected."
             case .google:
                 return "Gemini direct cache mutation is blocked to protect thought_signature compatibility."
+            case .ollama, .lmStudio:
+                return "Auto removes volatile Claude billing metadata from translated system prompts so local prefix caching can be reused."
             default:
                 return "This provider is observed, but no cache request mutation is enabled."
             }
@@ -1422,6 +1499,16 @@ final class AppViewModel: ObservableObject {
     @Published var showMenuBarExtra: Bool = true {
         didSet {
             defaults.set(showMenuBarExtra, forKey: Self.showMenuBarExtraDefaultsKey)
+        }
+    }
+
+    @Published var runInBackground: Bool = false {
+        didSet {
+            defaults.set(runInBackground, forKey: Self.runInBackgroundDefaultsKey)
+            if runInBackground && !showMenuBarExtra {
+                showMenuBarExtra = true
+            }
+            applyBackgroundActivationPolicy()
         }
     }
 
@@ -2325,6 +2412,11 @@ final class AppViewModel: ObservableObject {
         cliUpdateRunner: CLIUpdateRunner? = nil,
         cliAuthStatusRunner: CLIAuthStatusRunner? = nil,
         cliStopRunner: CLIStopRunner? = nil,
+        agentRuntimeManager: AgentRuntimeManager = AgentRuntimeManager(),
+        agentLinkManager: AgentExecutableLinkManager = AgentExecutableLinkManager(),
+        agentRegistrationManager: ACPRegistrationManager = ACPRegistrationManager(),
+        agentRuntimeInstaller: @escaping AgentRuntimeInstaller = { try await $0.install() },
+        agentHelperResolver: AgentHelperResolver? = nil,
         sessionReportURL: URL = SessionReportStore.defaultURL,
         inputOutputLoggingPreferencesStore: InputOutputLoggingPreferencesStore? = nil
     ) {
@@ -2341,6 +2433,11 @@ final class AppViewModel: ObservableObject {
         self.cliUpdateRunner = cliUpdateRunner
         self.cliAuthStatusRunner = cliAuthStatusRunner
         self.cliStopRunner = cliStopRunner
+        self.agentRuntimeManager = agentRuntimeManager
+        self.agentLinkManager = agentLinkManager
+        self.agentRegistrationManager = agentRegistrationManager
+        self.agentRuntimeInstaller = agentRuntimeInstaller
+        self.agentHelperResolver = agentHelperResolver ?? Self.bundledAgentHelpers
         self.sessionReportURL = sessionReportURL
         self.inputOutputLoggingPreferencesStore = inputOutputLoggingPreferencesStore
             ?? (defaults === UserDefaults.standard ? InputOutputLoggingPreferencesStore() : nil)
@@ -2370,6 +2467,9 @@ final class AppViewModel: ObservableObject {
         promptCachingMode = PromptCachingMode(
             rawValue: defaults.string(forKey: Self.promptCachingModeDefaultsKey) ?? ""
         ) ?? .computeCacheHints
+        selectedAgentMode = AgentMode(
+            rawValue: defaults.string(forKey: Self.selectedAgentModeDefaultsKey) ?? ""
+        ) ?? .claudeAgent
         if let rawActiveCustomProviderID = defaults.string(forKey: Self.activeCustomProviderIDDefaultsKey),
            let activeCustomProviderID = UUID(uuidString: rawActiveCustomProviderID) {
             if customProviderStorage.providers.contains(where: { $0.id == activeCustomProviderID }) {
@@ -2387,6 +2487,7 @@ final class AppViewModel: ObservableObject {
             defaults.string(forKey: Self.proxyPilotAccentHexDefaultsKey) ?? ""
         ) ?? ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = defaults.object(forKey: Self.showMenuBarExtraDefaultsKey) as? Bool ?? true
+        runInBackground = defaults.bool(forKey: Self.runInBackgroundDefaultsKey)
         menuBarSectionOrder = Self.decodedMenuBarSectionOrder(from: defaults)
         visibleMenuBarSections = Self.decodedVisibleMenuBarSections(from: defaults)
         visibleHomeDashboardSections = Self.decodedVisibleHomeDashboardSections(from: defaults)
@@ -2458,6 +2559,7 @@ final class AppViewModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
+                self?.persistAgentLaunchSettings()
             }
 
         // Forward ProxyLifecycleManager changes → AppViewModel objectWillChange
@@ -2494,6 +2596,8 @@ final class AppViewModel: ObservableObject {
             Task { await providerManager.loadVerifiedModels() }
         }
         Task { await hydrateCurrentProviderModelCacheIfNeeded() }
+
+        applyBackgroundActivationPolicy()
     }
 
     func applicationWillTerminate() {
@@ -2536,6 +2640,17 @@ final class AppViewModel: ObservableObject {
                 message: String(localized: "Launch at Login could not be updated:") + " " + error.localizedDescription,
                 actions: [.openReadme]
             ))
+        }
+    }
+
+    private func applyBackgroundActivationPolicy() {
+        // Skip under XCTest: mutating the test host's activation policy destabilizes the suite.
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        let policy: NSApplication.ActivationPolicy = runInBackground ? .accessory : .regular
+        guard NSApp != nil, NSApp.activationPolicy() != policy else { return }
+        NSApp.setActivationPolicy(policy)
+        if !runInBackground {
+            NSApp.activate(ignoringOtherApps: true)
         }
     }
 
@@ -2687,6 +2802,7 @@ final class AppViewModel: ObservableObject {
             activeCustomSelectedUpstreamModels = []
             activeCustomXcodeAgentModel = ""
         }
+        persistAgentLaunchSettings()
     }
 
     private func selectedUpstreamAPIKey() -> String? {
@@ -4360,6 +4476,152 @@ final class AppViewModel: ObservableObject {
     func detectXcodeInstallations() async {
         let installations = await xcodeDetectionService.detectInstallations()
         xcodeInstallations = installations
+        agentModesCapability = XcodeDetectionService.agentModesCapability(for: installations)
+        if !showsAgentModeChoice {
+            selectedAgentMode = .claudeAgent
+        }
+        await refreshProxyPilotAgentState()
+    }
+
+    func refreshProxyPilotAgentState() async {
+        let runtimeManager = agentRuntimeManager
+        agentRuntimeStatus = await Task.detached(priority: .utility) {
+            runtimeManager.status()
+        }.value
+        proxyPilotAgentRegistrationStatus = agentRegistrationManager.status(
+            xcodeBuild: selectedProxyPilotAgentXcode?.build
+        )
+        proxyPilotAgentStatusText = makeProxyPilotAgentStatusText()
+    }
+
+    func installProxyPilotAgent() async {
+        guard showsAgentModeChoice else { return }
+        isInstallingProxyPilotAgent = true
+        proxyPilotAgentStatusText = "Installing managed runtime..."
+        clearIssue()
+        defer { isInstallingProxyPilotAgent = false }
+
+        do {
+            persistAgentLaunchSettings()
+            _ = try await agentRuntimeInstaller(agentRuntimeManager)
+            guard let helpers = agentHelperResolver() else {
+                throw AgentRuntimeManagerError.installedRuntimeInvalid(
+                    "ProxyPilot Agent helper executables are missing from this app build."
+                )
+            }
+            try agentLinkManager.install(launcherSource: helpers.launcher, cliSource: helpers.cli)
+
+            switch agentModesCapability.proxyPilotAgent {
+            case .automaticRegistration(let xcode):
+                _ = try agentRegistrationManager.register(xcodeBuild: xcode.build)
+                proxyPilotAgentStatusText = "Installed and registered. Reopen Xcode Intelligence settings if it does not appear immediately."
+            case .manualRegistration:
+                proxyPilotAgentStatusText = "Runtime installed. Complete the manual registration shown below, then reopen Xcode Intelligence settings."
+            case .hidden:
+                return
+            }
+            telemetryService.track(
+                name: "proxy_pilot_agent_installed",
+                payload: ["registration": proxyPilotAgentUsesManualRegistration ? "manual" : "automatic"],
+                telemetryOptIn: telemetryOptIn
+            )
+            await refreshProxyPilotAgentState()
+        } catch {
+            proxyPilotAgentStatusText = error.localizedDescription
+            applyIssue(AppIssue(
+                code: .generic,
+                title: "ProxyPilot Agent Setup Failed",
+                message: error.localizedDescription,
+                actions: [.exportDiagnostics]
+            ))
+        }
+    }
+
+    func removeProxyPilotAgent() async {
+        clearIssue()
+        do {
+            _ = try agentRegistrationManager.remove(xcodeBuild: selectedProxyPilotAgentXcode?.build)
+            try agentLinkManager.remove()
+            try agentRuntimeManager.remove()
+            proxyPilotAgentStatusText = "Removed. Reopen Xcode Intelligence settings if the entry remains visible."
+            await refreshProxyPilotAgentState()
+        } catch {
+            proxyPilotAgentStatusText = error.localizedDescription
+            applyIssue(AppIssue(
+                code: .generic,
+                title: "Could Not Remove ProxyPilot Agent",
+                message: error.localizedDescription,
+                actions: [.exportDiagnostics]
+            ))
+        }
+    }
+
+    var proxyPilotAgentManualRegistrationCommands: String {
+        """
+        Name: ProxyPilot
+        Executable: \(ACPRegistrationManager.defaultExecutablePath())
+        Interpreter: leave blank
+        Arguments: leave blank
+        Environment: leave empty
+        """
+    }
+
+    private var selectedProxyPilotAgentXcode: AgentModesCapabilityPolicy.Xcode? {
+        switch agentModesCapability.proxyPilotAgent {
+        case .automaticRegistration(let xcode), .manualRegistration(let xcode, _): xcode
+        case .hidden: nil
+        }
+    }
+
+    private func makeProxyPilotAgentStatusText() -> String {
+        switch (agentRuntimeStatus, proxyPilotAgentRegistrationStatus?.state) {
+        case (.ready, .registered):
+            return "Runtime ready and registered with Xcode."
+        case (.ready, .stalePath):
+            return "Runtime ready, but Xcode points to a stale launcher path. Reinstall to repair it."
+        case (.ready, _):
+            return proxyPilotAgentUsesManualRegistration
+                ? "Runtime ready. Complete manual registration below."
+                : "Runtime ready but not registered with Xcode."
+        case (.stale(let reason, _), _):
+            return "Runtime update required: \(reason)"
+        case (.corrupt(let reason, _), _):
+            return "Runtime repair required: \(reason)"
+        case (.notInstalled, _):
+            return "Not installed"
+        }
+    }
+
+    private func persistAgentLaunchSettings() {
+        guard providerManager.isInitialized else { return }
+        let port = URL(string: proxyURLString)?.port.flatMap(UInt16.init(exactly:))
+            ?? ProxyPilotDefaults.defaultPort
+        let cacheMode: AgentLaunchSettings.PromptCachingMode = switch promptCachingMode {
+        case .off: .off
+        case .observeOnly, .explicitReferenceCache: .observeOnly
+        case .computeCacheHints: .auto
+        }
+        let settings = AgentLaunchSettings(
+            port: port,
+            modelID: effectiveXcodeAgentModel,
+            upstreamLabel: upstreamProviderDisplayTitle,
+            providerID: hasActiveCustomProvider ? UpstreamProvider.openAI.rawValue : upstreamProvider.rawValue,
+            upstreamURL: upstreamAPIBaseURLString,
+            credentialKey: activeCustomProvider?.keychainAccountName,
+            promptCachingMode: cacheMode
+        )
+        try? settings.save()
+    }
+
+    private static func bundledAgentHelpers() -> (launcher: URL, cli: URL)? {
+        let directory = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers", isDirectory: true)
+        let launcher = directory.appendingPathComponent("proxypilot-agent")
+        let cli = directory.appendingPathComponent("proxypilot")
+        guard FileManager.default.isExecutableFile(atPath: launcher.path),
+              FileManager.default.isExecutableFile(atPath: cli.path) else {
+            return nil
+        }
+        return (launcher, cli)
     }
 
     // MARK: - Xcode Agent Config

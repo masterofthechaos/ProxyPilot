@@ -3,11 +3,26 @@ import ProxyPilotCore
 import SwiftUI
 
 struct SessionHistoryView: View {
+    private enum ViewMode: String, CaseIterable, Identifiable {
+        case sessions
+        case usage
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .sessions: return "Session History"
+            case .usage: return "Your Usage"
+            }
+        }
+    }
+
     @EnvironmentObject private var vm: AppViewModel
 
     let prefersCompactLayout: Bool
     let onOpenAdvancedLogging: () -> Void
 
+    @State private var selectedViewMode: ViewMode = .sessions
     @State private var selectedSessionID: String?
     @State private var expandedRequestOffsets: Set<Int> = []
     @State private var expandedLogIDs: Set<UUID> = []
@@ -35,10 +50,14 @@ struct SessionHistoryView: View {
                 .layoutPriority(1)
             Divider()
 
-            if vm.sessionHistorySessions.isEmpty {
-                emptyState
+            if selectedViewMode == .sessions {
+                if vm.sessionHistorySessions.isEmpty {
+                    emptyState
+                } else {
+                    responsiveSessionBrowser
+                }
             } else {
-                responsiveSessionBrowser
+                usageBrowser
             }
         }
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -47,6 +66,9 @@ struct SessionHistoryView: View {
         }
         .onChange(of: selectedSessionID) { _, _ in
             resetSessionDetailState()
+            // Only the session browser renders the decrypted prompt/output log; the
+            // Your Usage view does not, so skip the per-session log reload there.
+            guard selectedViewMode == .sessions else { return }
             scheduleSelectedLogRefresh()
         }
         .onDisappear {
@@ -55,29 +77,48 @@ struct SessionHistoryView: View {
     }
 
     private var header: some View {
-        ViewThatFits {
-            HStack(alignment: .center, spacing: 12) {
-                headerTitle
-                Spacer()
-                refreshButton
+        VStack(alignment: .leading, spacing: 14) {
+            ViewThatFits {
+                HStack(alignment: .center, spacing: 12) {
+                    headerTitle
+                    Spacer()
+                    refreshButton
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    headerTitle
+                    refreshButton
+                }
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                headerTitle
-                refreshButton
+            Picker("Session History View", selection: $selectedViewMode) {
+                ForEach(ViewMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
             }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 360)
         }
         .padding(24)
     }
 
     private var headerTitle: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Session History")
+            Text(selectedViewMode.title)
                 .font(.title2.weight(.semibold))
-            Text("Review previous ProxyPilot sessions, including CLI and MCP request metadata. Full prompt and output bodies only appear when Input & Output Logging is enabled, and copy/export actions include decrypted content.")
+            Text(headerSubtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var headerSubtitle: String {
+        switch selectedViewMode {
+        case .sessions:
+            return "Review previous ProxyPilot sessions, including CLI and MCP request metadata. Full prompt and output bodies only appear when Input & Output Logging is enabled, and copy/export actions include decrypted content."
+        case .usage:
+            return "View all-time usage rolled up from the persisted session-report store, including token totals, source and model breakdowns, latency, and long-running session highlights."
         }
     }
 
@@ -96,6 +137,23 @@ struct SessionHistoryView: View {
             sessionDetail
         }
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var usageBrowser: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                if vm.allTimeUsage.isEmpty {
+                    usageEmptyState
+                } else {
+                    usageSummary(vm.allTimeUsage)
+                    usageHighlights(vm.allTimeUsage)
+                    usageBreakdowns(vm.allTimeUsage)
+                    usageTimeline(vm.allTimeUsage)
+                }
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private var sessionSelectorBar: some View {
@@ -175,6 +233,25 @@ struct SessionHistoryView: View {
         .frame(maxWidth: .infinity)
     }
 
+    private var usageEmptyState: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.system(size: 34, weight: .regular))
+                .foregroundStyle(.secondary)
+
+            Text("No usage data yet")
+                .font(.title3.weight(.semibold))
+
+            Text("Your Usage rolls up the same saved session-report store that powers Session History. Start the proxy and send a few requests, then come back here for all-time token totals, model and provider breakdowns, latency, and session highlights.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(24)
+        .frame(maxWidth: 560, maxHeight: .infinity, alignment: .center)
+        .frame(maxWidth: .infinity)
+    }
+
     @ViewBuilder
     private var sessionDetail: some View {
         if let session = selectedSession {
@@ -201,6 +278,159 @@ struct SessionHistoryView: View {
             requestTimeline(session)
             inputOutputArea(session)
         }
+    }
+
+    private func usageSummary(_ usage: AllTimeUsage) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("All-Time Summary")
+                .font(.headline)
+
+            ViewThatFits {
+                HStack(alignment: .top, spacing: 12) {
+                    usageMetaBlock(title: "Range", value: usageTimeRange(usage))
+                    usageMetaBlock(title: "Cache", value: usage.cacheHitRate.map { "\(formatPercent($0)) hit rate" } ?? "No cache telemetry yet")
+                    Spacer(minLength: 0)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    usageMetaBlock(title: "Range", value: usageTimeRange(usage))
+                    usageMetaBlock(title: "Cache", value: usage.cacheHitRate.map { "\(formatPercent($0)) hit rate" } ?? "No cache telemetry yet")
+                }
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 12)], alignment: .leading, spacing: 12) {
+                metric("Requests", "\(usage.requestCount)")
+                metric("Sessions", "\(usage.sessionCount)")
+                metric("Tokens", usage.totalTokensFormatted)
+                metric("Prompt", formatCompactInteger(usage.totalPromptTokens))
+                metric("Completion", formatCompactInteger(usage.totalCompletionTokens))
+                metric("P50", usage.p50Latency.map(formatLatency) ?? "No data")
+                metric("P95", usage.p95Latency.map(formatLatency) ?? "No data")
+                metric("Avg", usage.avgLatency.map(formatLatency) ?? "No data")
+                metric("Max", usage.maxLatency.map(formatLatency) ?? "No data")
+                if usage.cacheAccountingAvailable {
+                    metric("Cached", formatCompactInteger(usage.totalPromptCacheHitTokens))
+                    metric("Uncached", formatCompactInteger(usage.totalPromptCacheMissTokens))
+                    if usage.totalPromptCacheWriteTokens > 0 {
+                        metric("Cache Write", formatCompactInteger(usage.totalPromptCacheWriteTokens))
+                    }
+                }
+                metric("Req / Session", usage.averageRequestsPerSession.map { String(format: "%.2f", $0) } ?? "No data")
+                metric("Session Span", usage.averageSessionDurationSeconds.map(formatLatency) ?? "No data")
+            }
+        }
+        .padding(14)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func usageHighlights(_ usage: AllTimeUsage) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Session Highlights")
+                .font(.headline)
+
+            ViewThatFits {
+                HStack(alignment: .top, spacing: 12) {
+                    usageSessionStatCard(title: "Longest Session", session: usage.longestSession)
+                    usageSessionStatCard(title: "Busiest Session", session: usage.busiestSession)
+                }
+
+                VStack(alignment: .leading, spacing: 12) {
+                    usageSessionStatCard(title: "Longest Session", session: usage.longestSession)
+                    usageSessionStatCard(title: "Busiest Session", session: usage.busiestSession)
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func usageBreakdowns(_ usage: AllTimeUsage) -> some View {
+        ViewThatFits {
+            HStack(alignment: .top, spacing: 12) {
+                usageShareCard(
+                    title: "Provider Shares",
+                    emptyText: "No provider data available.",
+                    rows: usage.sourceShares.map { share in
+                        (
+                            label: share.source.isEmpty ? "(unknown source)" : share.source.uppercased(),
+                            detail: "\(share.requestCount) req",
+                            trailing: formatCompactInteger(share.totalTokens) + " tok"
+                        )
+                    }
+                )
+                usageShareCard(
+                    title: "Model Distribution",
+                    emptyText: "No model data available.",
+                    rows: usage.modelDistribution.map { entry in
+                        (
+                            label: entry.model.isEmpty ? "(unknown model)" : entry.model,
+                            detail: "\(entry.count) req",
+                            trailing: ""
+                        )
+                    }
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                usageShareCard(
+                    title: "Provider Shares",
+                    emptyText: "No provider data available.",
+                    rows: usage.sourceShares.map { share in
+                        (
+                            label: share.source.isEmpty ? "(unknown source)" : share.source.uppercased(),
+                            detail: "\(share.requestCount) req",
+                            trailing: formatCompactInteger(share.totalTokens) + " tok"
+                        )
+                    }
+                )
+                usageShareCard(
+                    title: "Model Distribution",
+                    emptyText: "No model data available.",
+                    rows: usage.modelDistribution.map { entry in
+                        (
+                            label: entry.model.isEmpty ? "(unknown model)" : entry.model,
+                            detail: "\(entry.count) req",
+                            trailing: ""
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    private func usageTimeline(_ usage: AllTimeUsage) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Daily Activity")
+                .font(.headline)
+
+            if usage.dailyTokenBuckets.isEmpty {
+                Text("No daily buckets are available yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(usage.dailyTokenBuckets, id: \.day) { bucket in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(bucket.day.formatted(date: .abbreviated, time: .omitted))
+                                .font(.caption.weight(.semibold))
+                            Text("\(bucket.requestCount) request\(bucket.requestCount == 1 ? "" : "s")")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(formatCompactInteger(bucket.totalTokens) + " tok")
+                            .font(.system(.caption, design: .monospaced))
+                        Text(formatCompactInteger(bucket.requestCount))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(10)
+                    .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func sessionHeader(_ session: SessionHistorySession) -> some View {
@@ -280,6 +510,110 @@ struct SessionHistoryView: View {
             }
             metric("P95", session.p95Latency.map(formatLatency) ?? "No data")
         }
+    }
+
+    private func usageMetaBlock(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func usageSessionStatCard(title: String, session: AllTimeUsage.SessionStat?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                if let session {
+                    Text("\(session.requestCount) req")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let session {
+                Text(session.id)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                HStack {
+                    Text(session.source.isEmpty ? "(unknown source)" : session.source.uppercased())
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                    Spacer()
+                    Text("\(formatCompactInteger(session.totalTokens)) tok")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack {
+                    Text(session.startedAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "No start")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(formatLatency(session.durationSeconds))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("No session data available.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func usageShareCard(
+        title: String,
+        emptyText: String,
+        rows: [(label: String, detail: String, trailing: String)]
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+
+            if rows.isEmpty {
+                Text(emptyText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    HStack(spacing: 10) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.label)
+                                .font(.caption.weight(.semibold))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(row.detail)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if !row.trailing.isEmpty {
+                            Text(row.trailing)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func modelDistribution(_ session: SessionHistorySession) -> some View {
@@ -930,6 +1264,17 @@ struct SessionHistoryView: View {
         return String(format: "%.2fs", seconds)
     }
 
+    private func usageTimeRange(_ usage: AllTimeUsage) -> String {
+        guard let startedAt = usage.startedAt else { return "No usage data" }
+        let start = startedAt.formatted(date: .abbreviated, time: .shortened)
+        guard let endedAt = usage.endedAt, endedAt != startedAt else { return start }
+        return "\(start) - \(endedAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    private func formatPercent(_ value: Double) -> String {
+        String(format: "%.1f%%", value * 100)
+    }
+
     private func formatCompactInteger(_ value: Int) -> String {
         if value >= 1_000_000 {
             return String(format: "%.1fM", Double(value) / 1_000_000)
@@ -994,6 +1339,14 @@ struct SessionHistoryView: View {
     }
 
     private func refreshHistory() async {
+        // Usage mode renders only the all-time rollup (vm.allTimeUsage); the per-session
+        // prompt/output log is not visible there. Reload that only in sessions mode, and
+        // bail out before touching selection so usage-mode refresh neither mutates
+        // selectedSessionID nor triggers its onChange -> decrypted-log reload path.
+        guard selectedViewMode == .sessions else {
+            await vm.refreshSessionHistory()
+            return
+        }
         let previousSelectedSessionID = selectedSessionID
         await vm.refreshSessionHistory()
         if selectedSessionID == nil || !vm.sessionHistorySessions.contains(where: { $0.id == selectedSessionID }) {

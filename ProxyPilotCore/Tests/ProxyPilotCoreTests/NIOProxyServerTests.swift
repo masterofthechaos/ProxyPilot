@@ -1,5 +1,8 @@
 import Testing
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import NIOCore
 import NIOPosix
 import NIOHTTP1
@@ -625,6 +628,51 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
+    @Test func ollamaAnthropicTranslationRemovesLeadingBillingHeaderUpstream() async throws {
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: #"{"id":"chatcmpl-local-cache","model":"qwen3-coder","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#,
+            requireJSONRequest: true
+        )
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamProvider: .ollama,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)/v1",
+            requiresAuth: false,
+            preferredAnthropicUpstreamModel: "qwen3-coder",
+            promptCaching: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-sonnet-4-5-20250514",
+            "max_tokens": 64,
+            "system": "x-anthropic-billing-header: cc_version=2.1.118.147; cc_entrypoint=sdk-cli; cch=203d1;\nYou are a coding agent.",
+            "messages": [["role": "user", "content": "Keep cch=12345 here."]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+        let capturedRequest = try #require(stub.requests().first)
+        #expect(capturedRequest.uri.hasSuffix("/chat/completions"))
+        let capturedBody = try #require(capturedRequest.body.data(using: .utf8))
+        let json = try #require(JSONSerialization.jsonObject(with: capturedBody) as? [String: Any])
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        #expect(messages[0]["role"] as? String == "system")
+        #expect(messages[0]["content"] as? String == "You are a coding agent.")
+        #expect(messages[1]["content"] as? String == "Keep cch=12345 here.")
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
     @Test func xAIComputeCacheHintsReachUpstreamHeader() async throws {
         let stub = StubUpstream()
         let upstreamPort = try await stub.start(
@@ -1075,6 +1123,7 @@ struct NIOProxyServerTests {
             "model": "claude-sonnet-4-5-20250514",
             "max_tokens": 100,
             "stream": false,
+            "system": "x-anthropic-billing-header: cc_version=2.1.118.147; cc_entrypoint=sdk-cli; cch=203d1;\nKeep this passthrough content.",
             "messages": [["role": "user", "content": "hi"]]
         ])
 
@@ -1091,6 +1140,7 @@ struct NIOProxyServerTests {
         let capturedBody = try #require(JSONSerialization.jsonObject(with: capturedBodyData) as? [String: Any])
         #expect(capturedBody["model"] as? String == "deepseek-v4-pro")
         #expect(capturedBody["max_tokens"] as? Int == 100)
+        #expect(capturedBody["system"] as? String == "x-anthropic-billing-header: cc_version=2.1.118.147; cc_entrypoint=sdk-cli; cch=203d1;\nKeep this passthrough content.")
         #expect(capturedBody["messages"] != nil)
 
         try await server.stop()

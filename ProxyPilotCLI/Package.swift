@@ -4,6 +4,10 @@ import PackageDescription
 let package = Package(
     name: "ProxyPilotCLI",
     platforms: [.macOS(.v15)],
+    products: [
+        .executable(name: "proxypilot", targets: ["proxypilot"]),
+        .executable(name: "proxypilot-agent", targets: ["proxypilot-agent"]),
+    ],
     dependencies: [
         .package(path: "../ProxyPilotCore"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
@@ -18,6 +22,11 @@ let package = Package(
                 .product(name: "MCP", package: "swift-sdk"),
             ],
             path: "Sources"
+        ),
+        .executableTarget(
+            name: "proxypilot-agent",
+            dependencies: ["ProxyPilotCore"],
+            path: "AgentSources"
         ),
         .testTarget(
             name: "ProxyPilotCLITests",

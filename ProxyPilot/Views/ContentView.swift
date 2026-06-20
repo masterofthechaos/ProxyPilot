@@ -826,7 +826,84 @@ struct ContentView: View {
                 .font(.caption)
             }
 
-            Section("Xcode Claude Agent Routing (Xcode 26.3+)") {
+            if vm.showsAgentModeChoice {
+                Section("Xcode Agent Mode") {
+                    Picker("Agent Mode", selection: $vm.selectedAgentMode) {
+                        ForEach(AppViewModel.AgentMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text(vm.proxyPilotAgentCapabilityText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if vm.showsAgentModeChoice && vm.selectedAgentMode == .proxyPilotAgent {
+                Section("ProxyPilot Agent") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: vm.agentRuntimeStatus.isReady
+                                ? "checkmark.seal.fill" : "shippingbox")
+                                .foregroundStyle(vm.agentRuntimeStatus.isReady ? .green : .secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Managed Agent Runtime")
+                                    .font(.subheadline)
+                                Text(vm.proxyPilotAgentStatusText)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+
+                        Text("ProxyPilot manages the pinned Node and agent adapter runtime, keeps Xcode pointed at a stable launcher path, and routes the agent through your current ProxyPilot provider and model.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        if vm.proxyPilotAgentUsesManualRegistration {
+                            DisclosureGroup("Manual Registration Required") {
+                                Text("In Xcode Settings > Intelligence, add an agent with these exact values:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(vm.proxyPilotAgentManualRegistrationCommands)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .padding(8)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(Color(nsColor: .controlBackgroundColor))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+
+                        HStack(spacing: 12) {
+                            Button(vm.isInstallingProxyPilotAgent ? "Installing..." : "Install or Repair") {
+                                Task { await vm.installProxyPilotAgent() }
+                            }
+                            .disabled(vm.isInstallingProxyPilotAgent)
+
+                            Button("Remove") {
+                                Task { await vm.removeProxyPilotAgent() }
+                            }
+                            .foregroundStyle(.red)
+
+                            Button("Refresh") {
+                                Task { await vm.refreshProxyPilotAgentState() }
+                            }
+                            .disabled(vm.isInstallingProxyPilotAgent)
+                            Spacer()
+                        }
+
+                        Text("Xcode usually refreshes Agent Modes automatically. Reopen Intelligence settings if a setup change is not visible yet.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            if !vm.showsAgentModeChoice || vm.selectedAgentMode == .claudeAgent {
+                Section("Xcode Claude Agent Routing (Xcode 26.3+)") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Routes Xcode Claude Agent traffic through ProxyPilot. This is separate from Xcode's Chat Provider setup above.")
                         .font(.subheadline)
@@ -1082,6 +1159,7 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                }
                 }
             }
 
@@ -1764,6 +1842,24 @@ struct ContentView: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+            }
+
+            Section("Background & Startup") {
+                Toggle("Launch at Login", isOn: Binding(
+                    get: { vm.launchAtLogin },
+                    set: { _ in vm.toggleLaunchAtLogin() }
+                ))
+                .toggleStyle(.switch)
+                .help("Automatically start ProxyPilot when you log in.")
+                .accessibilityLabel("Launch at login")
+
+                Toggle("Run in Background", isOn: Binding(
+                    get: { vm.runInBackground },
+                    set: { vm.runInBackground = $0 }
+                ))
+                .toggleStyle(.switch)
+                .help("Hide the Dock icon and keep ProxyPilot running from the menu bar. Keeps the menu bar icon enabled so the app stays reachable.")
+                .accessibilityLabel("Run in background")
             }
 
             Section("Updates") {

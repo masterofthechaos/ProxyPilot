@@ -58,7 +58,9 @@ struct AuthRemoveCommand: AsyncParsableCommand {
             }
 
             print("Remove stored API key for \(upstreamProvider.rawValue)? [y/N]: ", terminator: "")
-            fflush(stdout)
+            // fflush(nil) flushes all open streams; Glibc's `stdout` global is
+            // not concurrency-safe to reference under Swift 6.
+            fflush(nil)
             let response = (readLine() ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if response != "y" && response != "yes" {
                 OutputFormatter.success(

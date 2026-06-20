@@ -272,6 +272,149 @@ struct PromptCacheAdapterTests {
         expectHeaders(mutation.headers, equal: originalHeaders)
     }
 
+    @Test func ollamaAutoRemovesExactLeadingAnthropicBillingHeaderLine() throws {
+        let body = Data(#"{"model":"qwen3-coder","messages":[{"role":"system","content":"x-anthropic-billing-header: cc_version=2.1.118.147; cc_entrypoint=sdk-cli; cch=203d1;\nYou are a coding agent."},{"role":"user","content":"Keep this cch=12345 text."}]}"#.utf8)
+
+        let mutation = PromptCacheAdapter.mutate(
+            path: "/v1/chat/completions",
+            headers: originalHeaders,
+            body: body,
+            provider: .ollama,
+            model: "qwen3-coder",
+            sessionID: "session-a",
+            configuration: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        #expect(mutation.applied)
+        #expect(mutation.strategy == "local_anthropic_billing_header_removed")
+        let messages = try decodedMessages(from: mutation.body)
+        #expect(messages[0]["content"] as? String == "You are a coding agent.")
+        #expect(messages[1]["content"] as? String == "Keep this cch=12345 text.")
+    }
+
+    @Test func lmStudioAutoRemovesCRLFTerminatedLeadingAnthropicBillingHeaderLine() throws {
+        let body = Data(#"{"model":"local-model","messages":[{"role":"system","content":"x-anthropic-billing-header: cc_version=2.1.118.147; cc_entrypoint=sdk-cli; cch=abcde;\r\nStable instructions."}]}"#.utf8)
+
+        let mutation = PromptCacheAdapter.mutate(
+            path: "/chat/completions",
+            headers: originalHeaders,
+            body: body,
+            provider: .lmStudio,
+            model: "local-model",
+            sessionID: "session-a",
+            configuration: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        #expect(mutation.applied)
+        let messages = try decodedMessages(from: mutation.body)
+        #expect(messages[0]["content"] as? String == "Stable instructions.")
+    }
+
+    @Test func localAutoPreservesNonLeadingAnthropicBillingHeaderText() {
+        let body = Data(#"{"model":"qwen3-coder","messages":[{"role":"system","content":"Stable instructions.\nx-anthropic-billing-header: cc_version=2.1; cch=abcde;"}]}"#.utf8)
+
+        let mutation = PromptCacheAdapter.mutate(
+            path: "/v1/chat/completions",
+            headers: originalHeaders,
+            body: body,
+            provider: .ollama,
+            model: "qwen3-coder",
+            sessionID: "session-a",
+            configuration: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        #expect(!mutation.applied)
+        #expect(mutation.body == body)
+    }
+
+    @Test func localAutoPreservesUserRoleBillingHeaderAndArbitraryCCHText() {
+        let body = Data(#"{"model":"qwen3-coder","messages":[{"role":"system","content":"Keep arbitrary cch=abcde text."},{"role":"user","content":"x-anthropic-billing-header: cc_version=2.1; cch=12345;\nThis is user content."}]}"#.utf8)
+
+        let mutation = PromptCacheAdapter.mutate(
+            path: "/v1/chat/completions",
+            headers: originalHeaders,
+            body: body,
+            provider: .ollama,
+            model: "qwen3-coder",
+            sessionID: "session-a",
+            configuration: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        #expect(!mutation.applied)
+        #expect(mutation.body == body)
+    }
+
+    @Test func observeOnlyPreservesLeadingAnthropicBillingHeader() {
+        let body = Data(#"{"model":"qwen3-coder","messages":[{"role":"system","content":"x-anthropic-billing-header: cc_version=2.1; cch=abcde;\nStable instructions."}]}"#.utf8)
+
+        let mutation = PromptCacheAdapter.mutate(
+            path: "/v1/chat/completions",
+            headers: originalHeaders,
+            body: body,
+            provider: .ollama,
+            model: "qwen3-coder",
+            sessionID: "session-a",
+            configuration: PromptCachingConfiguration(isEnabled: true, mode: .observeOnly)
+        )
+
+        #expect(!mutation.applied)
+        #expect(mutation.body == body)
+    }
+
+    @Test func offModePreservesLeadingAnthropicBillingHeader() {
+        let body = Data(#"{"model":"qwen3-coder","messages":[{"role":"system","content":"x-anthropic-billing-header: cc_version=2.1; cch=abcde;\nStable instructions."}]}"#.utf8)
+
+        let mutation = PromptCacheAdapter.mutate(
+            path: "/v1/chat/completions",
+            headers: originalHeaders,
+            body: body,
+            provider: .ollama,
+            model: "qwen3-coder",
+            sessionID: "session-a",
+            configuration: PromptCachingConfiguration(isEnabled: false, mode: .off)
+        )
+
+        #expect(!mutation.applied)
+        #expect(mutation.body == body)
+    }
+
+    @Test func cloudProviderPreservesLeadingAnthropicBillingHeader() throws {
+        let content = "x-anthropic-billing-header: cc_version=2.1; cch=abcde;\nStable instructions."
+        let body = Data(#"{"model":"gpt-5.1","messages":[{"role":"system","content":"x-anthropic-billing-header: cc_version=2.1; cch=abcde;\nStable instructions."}]}"#.utf8)
+
+        let mutation = PromptCacheAdapter.mutate(
+            path: "/v1/chat/completions",
+            headers: originalHeaders,
+            body: body,
+            provider: .openAI,
+            model: "gpt-5.1",
+            sessionID: "session-a",
+            configuration: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        #expect(mutation.applied)
+        #expect(mutation.strategy == "prompt_cache_key")
+        let messages = try decodedMessages(from: mutation.body)
+        #expect(messages[0]["content"] as? String == content)
+    }
+
+    @Test func anthropicPassthroughPathPreservesLeadingBillingHeader() {
+        let body = Data(#"{"model":"qwen3-coder","system":"x-anthropic-billing-header: cc_version=2.1; cch=abcde;\nStable instructions.","messages":[{"role":"user","content":"hi"}]}"#.utf8)
+
+        let mutation = PromptCacheAdapter.mutate(
+            path: "/v1/messages",
+            headers: originalHeaders,
+            body: body,
+            provider: .ollama,
+            model: "qwen3-coder",
+            sessionID: "session-a",
+            configuration: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        #expect(!mutation.applied)
+        #expect(mutation.body == body)
+    }
+
     @Test func miniMaxAnthropicPassthroughInjectsCacheControl() throws {
         let body = Data(#"{"model":"MiniMax-M2","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}"#.utf8)
         let mutation = PromptCacheAdapter.mutate(
@@ -340,5 +483,10 @@ struct PromptCacheAdapterTests {
             #expect(actual[index].0 == expectedHeader.0, sourceLocation: sourceLocation)
             #expect(actual[index].1 == expectedHeader.1, sourceLocation: sourceLocation)
         }
+    }
+
+    private func decodedMessages(from body: Data) throws -> [[String: Any]] {
+        let request = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        return try #require(request["messages"] as? [[String: Any]])
     }
 }

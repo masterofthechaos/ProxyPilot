@@ -182,13 +182,43 @@ run_test "--help shows expected subcommands"
 
 HELP_OUTPUT="$("$BINARY" --help 2>&1)"
 
-for subcmd in start stop status models logs config auth setup launch update serve; do
+for subcmd in start stop status models logs config agent auth setup launch update serve; do
     if echo "$HELP_OUTPUT" | grep -q "$subcmd"; then
         pass "--help lists subcommand: $subcmd"
     else
         fail "--help lists subcommand: $subcmd" "Not found in help output"
     fi
 done
+
+if echo "$HELP_OUTPUT" | grep -Eq '^  acp[[:space:]]'; then
+    fail "--help hides compatibility subcommand: acp" "ACP implementation detail appeared in public help"
+else
+    pass "--help hides compatibility subcommand: acp"
+fi
+
+run_test "agent status emits structured JSON"
+
+AGENT_STATUS_JSON="$("$BINARY" agent status --json 2>&1)"
+AGENT_STATUS_CHECK="$(python3 - "$AGENT_STATUS_JSON" <<'PY'
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    assert d.get("schema_version") == 1
+    assert d.get("command") == "agent status"
+    data = d.get("data", {})
+    assert data.get("runtime") in {"ready", "stale", "corrupt", "not_installed"}
+    assert data.get("registration") in {"registered", "stale_path", "not_registered"}
+    assert isinstance(data.get("executable_path"), str)
+    print("PASS")
+except Exception as e:
+    print("PARSE_ERROR: " + str(e))
+PY
+)"
+if [[ "$AGENT_STATUS_CHECK" == "PASS" ]]; then
+    pass "agent status returns structured JSON: $AGENT_STATUS_JSON"
+else
+    fail "agent status returns structured JSON" "$AGENT_STATUS_CHECK / $AGENT_STATUS_JSON"
+fi
 
 run_test "start and serve help document prompt caching mode"
 
@@ -427,7 +457,7 @@ MSGS_HTTP_CODE="$(curl -s -o /tmp/pp_messages.json -w "%{http_code}" \
     -X POST http://127.0.0.1:${SMOKE_PORT}/v1/messages \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    -d '{"model":"claude-3-haiku-20240307","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}' \
+    -d '{"model":"smoke-model","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}' \
     2>&1 || true)"
 MSGS_BODY="$(cat /tmp/pp_messages.json 2>/dev/null || echo '')"
 
@@ -668,7 +698,7 @@ VALID_MSGS_HTTP_CODE="$(curl -s -o /tmp/pp_valid_messages.json -w "%{http_code}"
     -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/messages \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    -d '{"model":"claude-3-haiku-20240307","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}' \
+    -d '{"model":"smoke-model","max_tokens":10,"messages":[{"role":"user","content":"ping"}]}' \
     2>&1 || true)"
 VALID_MSGS_CHECK="$(python3 - "$VALID_MSGS_HTTP_CODE" /tmp/pp_valid_messages.json <<'PY'
 import json
@@ -698,7 +728,7 @@ VALID_STREAM_HTTP_CODE="$(curl -s -o /tmp/pp_valid_messages_stream.txt -w "%{htt
     -X POST http://127.0.0.1:${VALID_PROXY_PORT}/v1/messages \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    -d '{"model":"claude-3-haiku-20240307","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"ping"}]}' \
+    -d '{"model":"smoke-model","max_tokens":10,"stream":true,"messages":[{"role":"user","content":"ping"}]}' \
     2>&1 || true)"
 VALID_STREAM_CHECK="$(python3 - "$VALID_STREAM_HTTP_CODE" /tmp/pp_valid_messages_stream.txt <<'PY'
 import sys

@@ -1,4 +1,5 @@
 import Foundation
+import ProxyPilotCore
 
 struct XcodeInstallation: Identifiable, Sendable {
     let id: String
@@ -26,6 +27,22 @@ final class XcodeDetectionService: Sendable {
         paths = paths.filter { seen.insert($0.standardizedFileURL.path).inserted }
         return paths.compactMap { parseXcodeBundle(at: $0) }
             .sorted { $0.version > $1.version }
+    }
+
+    static func agentModesCapability(
+        for installations: [XcodeInstallation],
+        macOSVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
+    ) -> AgentModesCapabilityPolicy.Evaluation {
+        AgentModesCapabilityPolicy.evaluate(
+            macOSVersion: .init(
+                major: macOSVersion.majorVersion,
+                minor: macOSVersion.minorVersion,
+                patch: macOSVersion.patchVersion
+            ),
+            xcodes: installations.map {
+                .init(id: $0.id, version: $0.version, build: $0.buildNumber)
+            }
+        )
     }
 
     private func discoverXcodePaths() async -> [URL] {
@@ -111,7 +128,7 @@ final class XcodeDetectionService: Sendable {
         }
 
         let version = plist["CFBundleShortVersionString"] as? String ?? "unknown"
-        let build = plist["DTXcodeBuild"] as? String ?? plist["CFBundleVersion"] as? String ?? "?"
+        let build = XcodeBuildDetector.detectBuildNumber(at: path) ?? "?"
         let isBeta = path.lastPathComponent.localizedCaseInsensitiveContains("beta")
 
         let supportsAgentic = Self.versionCompare(version, isAtLeast: Self.minimumAgenticVersion)

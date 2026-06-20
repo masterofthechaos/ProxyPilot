@@ -1,4 +1,5 @@
 import XCTest
+import ProxyPilotCore
 @testable import ProxyPilot
 
 final class XcodeDetectionServiceTests: XCTestCase {
@@ -40,5 +41,26 @@ final class XcodeDetectionServiceTests: XCTestCase {
 
     func testConfigPathUsesClaudeAgentConfig() {
         XCTAssertEqual(XcodeDetectionService.configRelativePath, "Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig")
+    }
+
+    func testAgentModesCapabilityUsesSharedPolicy() {
+        let installation = XcodeInstallation(
+            id: "/Applications/Xcode-beta.app",
+            path: URL(fileURLWithPath: "/Applications/Xcode-beta.app"),
+            version: "27.0",
+            buildNumber: "27A5194q",
+            isBeta: true,
+            supportsAgenticCoding: true,
+            claudeBinaryVersion: "27.0",
+            configPath: "/Users/example/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig"
+        )
+
+        let capability = XcodeDetectionService.agentModesCapability(
+            for: [installation],
+            macOSVersion: OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
+        )
+
+        XCTAssertTrue(capability.isClaudeAgentAvailable)
+        XCTAssertTrue(capability.proxyPilotAgent.allowsAutomaticRegistration)
     }
 }

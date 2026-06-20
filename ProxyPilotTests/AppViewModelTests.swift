@@ -89,6 +89,43 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(relaunched.promptCachingConfiguration.canonicalizeJSONForCache)
     }
 
+    func testAgentModeDefaultsToClaudeAndPersistsProxyPilotSelection() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+
+        XCTAssertEqual(vm?.selectedAgentMode, .claudeAgent)
+        vm?.selectedAgentMode = .proxyPilotAgent
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+        XCTAssertEqual(relaunched.selectedAgentMode, .proxyPilotAgent)
+    }
+
+    func testAgentRuntimeRefreshReportsNotInstalledForEmptyManagedRoot() async {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("proxypilot-agent-vm-tests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runtime = AgentRuntimeManager(
+            layout: ManagedAgentRuntimeLayout(
+                root: root.appendingPathComponent("runtime"),
+                claudeConfigDirectory: root.appendingPathComponent("claude-config")
+            )
+        )
+        let registration = ACPRegistrationManager(
+            acpDirectoryURL: root.appendingPathComponent("registrations"),
+            executablePath: root.appendingPathComponent("bin/proxypilot-agent").path
+        )
+        let vm = AppViewModel(
+            defaults: defaults,
+            agentRuntimeManager: runtime,
+            agentRegistrationManager: registration
+        )
+
+        await vm.refreshProxyPilotAgentState()
+
+        XCTAssertEqual(vm.agentRuntimeStatus, .notInstalled)
+        XCTAssertEqual(vm.proxyPilotAgentStatusText, "Not installed")
+    }
+
     func testBuiltInProxyConfigCarriesPromptCachingMode() throws {
         let vm = AppViewModel(defaults: defaults)
         vm.promptCachingMode = .off
@@ -97,6 +134,16 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(config.promptCaching.mode, .off)
         XCTAssertFalse(config.promptCaching.recordsProviderCacheTelemetry)
+    }
+
+    func testLocalProvidersDescribeAutomaticBillingMetadataRemoval() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.promptCachingMode = .computeCacheHints
+
+        for provider in [UpstreamProvider.ollama, .lmStudio] {
+            vm.upstreamProvider = provider
+            XCTAssertTrue(vm.promptCachingProviderStatusText.contains("removes volatile Claude billing metadata"))
+        }
     }
 
     func testBuiltInProxyConfigDoesNotRequireLocalAuthForStoredUpstreamKeyWhenAuthDisabled() throws {
@@ -222,6 +269,56 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.inputOutputLoggingExternalStorageEnabled)
     }
 
+    func testRefreshSessionHistoryLoadsAllTimeUsage() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let reportURL = directory.appendingPathComponent("session-report.jsonl")
+        try SessionReportStore.append(
+            SessionReportEvent(
+                source: "gui",
+                sessionID: "session-a",
+                record: RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 100),
+                    model: "gpt-4o",
+                    promptTokens: 10,
+                    completionTokens: 5,
+                    durationSeconds: 1.0,
+                    path: "/v1/chat/completions",
+                    wasStreaming: false
+                )
+            ),
+            to: reportURL
+        )
+        try SessionReportStore.append(
+            SessionReportEvent(
+                source: "cli",
+                sessionID: "session-b",
+                record: RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 200),
+                    model: "claude-3.5",
+                    promptTokens: 20,
+                    completionTokens: 10,
+                    durationSeconds: 2.0,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            ),
+            to: reportURL
+        )
+
+        let vm = AppViewModel(defaults: defaults, sessionReportURL: reportURL)
+        await vm.refreshSessionHistory()
+
+        XCTAssertEqual(vm.sessionHistorySessions.count, 2)
+        XCTAssertEqual(vm.allTimeUsage.requestCount, 2)
+        XCTAssertEqual(vm.allTimeUsage.sessionCount, 2)
+        XCTAssertEqual(vm.allTimeUsage.totalTokens, 45)
+        XCTAssertEqual(vm.allTimeUsage.sourceShares.map(\.source), ["cli", "gui"])
+    }
+
     func testCustomizationDefaultsPreserveCurrentExperience() {
         let vm = AppViewModel(defaults: defaults)
 
@@ -235,6 +332,31 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.keysProviderOrder, KeysProviderViewItem.defaultOrder)
         XCTAssertEqual(vm.visibleKeysProviders, Set(KeysProviderViewItem.defaultOrder))
         XCTAssertTrue(vm.copilotSidecarExpanded)
+    }
+
+    func testRunInBackgroundDefaultsToFalse() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertFalse(vm.runInBackground)
+    }
+
+    func testRunInBackgroundPreferencePersists() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+        vm?.runInBackground = true
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(relaunched.runInBackground)
+    }
+
+    func testEnablingRunInBackgroundForcesMenuBarExtraOn() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.showMenuBarExtra = false
+        vm.runInBackground = true
+
+        XCTAssertTrue(vm.showMenuBarExtra)
+        XCTAssertTrue(vm.runInBackground)
     }
 
     func testToolbarStatusHidesPlainStoppedStateOnly() {

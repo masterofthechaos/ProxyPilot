@@ -1096,6 +1096,58 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(capturedRequest.headerValue("accept"), "application/json")
     }
 
+    func testBuiltInProxyOllamaAnthropicTranslationRemovesLeadingBillingHeader() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"chatcmpl-local-cache","model":"qwen3-coder","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            sessionID: "gui-local-cache-session",
+            masterKey: "test",
+            upstreamProvider: .ollama,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "qwen3-coder",
+            googleThoughtSignatureStore: nil,
+            promptCaching: PromptCachingConfiguration(isEnabled: true, mode: .computeCacheHints)
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody([
+            "model": "claude-sonnet-4-5-20250514",
+            "max_tokens": 64,
+            "system": "x-anthropic-billing-header: cc_version=2.1.118.147; cc_entrypoint=sdk-cli; cch=203d1;\nYou are a coding agent.",
+            "messages": [["role": "user", "content": "Keep cch=12345 here."]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+
+        let capturedRequest = try XCTUnwrap(upstream.requests().first)
+        let bodyData = try XCTUnwrap(capturedRequest.body.data(using: .utf8))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        let messages = try XCTUnwrap(json["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages[0]["role"] as? String, "system")
+        XCTAssertEqual(messages[0]["content"] as? String, "You are a coding agent.")
+        XCTAssertEqual(messages[1]["content"] as? String, "Keep cch=12345 here.")
+    }
+
     func testBuiltInProxyBufferedChatRecordsCacheWriteTokens() async throws {
         let upstream = LocalHTTPStubServer(body: """
         {"id":"chatcmpl-cache","model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19,"prompt_tokens_details":{"cached_tokens":5},"cache_creation_input_tokens":3}}

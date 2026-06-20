@@ -39,6 +39,12 @@ public enum PromptCacheAdapter {
             return .passThrough(body: body, headers: headers)
         }
 
+        if path.hasSuffix("/chat/completions"),
+           provider == .ollama || provider == .lmStudio,
+           let mutation = removeLeadingAnthropicBillingHeader(body: body, headers: headers) {
+            return mutation
+        }
+
         if path.contains("/messages"), capabilities.supportsAnthropicCacheControl {
             return mutateAnthropicCacheControl(body: body, headers: headers)
         }
@@ -74,6 +80,39 @@ public enum PromptCacheAdapter {
             route: path
         )
         return mutatePromptCacheKey(body: body, headers: headers, cacheKey: cacheKey)
+    }
+
+    private static func removeLeadingAnthropicBillingHeader(
+        body: Data,
+        headers: [(String, String)]
+    ) -> PromptCacheMutation? {
+        let prefix = "x-anthropic-billing-header:"
+        guard var request = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              var messages = request["messages"] as? [[String: Any]],
+              !messages.isEmpty,
+              messages[0]["role"] as? String == "system",
+              let content = messages[0]["content"] as? String,
+              content.hasPrefix(prefix) else {
+            return nil
+        }
+
+        if let newline = content.range(of: "\n") {
+            messages[0]["content"] = String(content[newline.upperBound...])
+        } else {
+            messages[0]["content"] = ""
+        }
+        request["messages"] = messages
+
+        guard let mutatedBody = try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys]) else {
+            return nil
+        }
+
+        return PromptCacheMutation(
+            body: mutatedBody,
+            headers: headers,
+            applied: true,
+            strategy: "local_anthropic_billing_header_removed"
+        )
     }
 
     private static func mutatePromptCacheKey(

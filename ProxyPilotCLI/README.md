@@ -66,6 +66,18 @@ When no `--model` is passed for Ollama or LM Studio, `start` fetches the upstrea
 
 ## Commands
 
+### `agent`
+
+Manage the capability-gated ProxyPilot Agent runtime for Xcode 27. The installer downloads pinned, integrity-checked runtime components, maintains stable launcher links under `~/.proxypilot/bin/`, and automatically registers only Xcode builds proven safe for programmatic registration. Other Xcode 27 builds receive exact manual-registration fields.
+
+```sh
+proxypilot agent install [--json]
+proxypilot agent status [--json]
+proxypilot agent remove [--json]
+```
+
+The older `proxypilot acp` command remains a hidden compatibility alias; public automation should use `proxypilot agent`.
+
 ### `setup`
 
 Guided setup workflows. `setup xcode` stores the API key when provided, starts the daemon if needed, installs Xcode Agent routing, and verifies the local `/v1/models` endpoint.

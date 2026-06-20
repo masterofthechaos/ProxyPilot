@@ -47,7 +47,33 @@ enum UpstreamClient {
         body: Data?,
         config: ProxyConfiguration
     ) -> AsyncThrowingStream<Data, Error> {
-        AsyncThrowingStream { continuation in
+        #if canImport(FoundationNetworking)
+        // swift-corelibs-foundation has no `URLSession.bytes(for:)`; stream via
+        // a data-delegate bridge that re-chunks to one line per yield, matching
+        // the contract consumers rely on ("each chunk is one line").
+        return AsyncThrowingStream { continuation in
+            let request: URLRequest
+            do {
+                request = try buildRequest(
+                    path: path, method: method, headers: headers, body: body, config: config)
+            } catch {
+                continuation.finish(throwing: error)
+                return
+            }
+            let bridge = LineStreamingBridge(continuation: continuation)
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 30
+            config.timeoutIntervalForResource = 300
+            let session = URLSession(configuration: config, delegate: bridge, delegateQueue: nil)
+            let task = session.dataTask(with: request)
+            continuation.onTermination = { _ in
+                task.cancel()
+                session.finishTasksAndInvalidate()
+            }
+            task.resume()
+        }
+        #else
+        return AsyncThrowingStream { continuation in
             Task {
                 do {
                     let request = try buildRequest(
@@ -88,7 +114,67 @@ enum UpstreamClient {
                 }
             }
         }
+        #endif
     }
+
+    #if canImport(FoundationNetworking)
+    /// Bridges URLSessionDataDelegate callbacks into an AsyncThrowingStream,
+    /// buffering partial lines so each yield is a complete newline-terminated
+    /// line. Error statuses (>= 400) accumulate the body and finish by
+    /// throwing `UpstreamError.httpError`, mirroring the Darwin path.
+    private final class LineStreamingBridge: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let continuation: AsyncThrowingStream<Data, Error>.Continuation
+        private var buffer = Data()
+        private var errorBody = Data()
+        private var statusCode = 200
+
+        init(continuation: AsyncThrowingStream<Data, Error>.Continuation) {
+            self.continuation = continuation
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            dataTask: URLSessionDataTask,
+            didReceive response: URLResponse,
+            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+        ) {
+            if let http = response as? HTTPURLResponse {
+                statusCode = http.statusCode
+            }
+            completionHandler(.allow)
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            guard statusCode < 400 else {
+                errorBody.append(data)
+                return
+            }
+            buffer.append(data)
+            while let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+                let afterNewline = buffer.index(after: newlineIndex)
+                continuation.yield(buffer.subdata(in: buffer.startIndex..<afterNewline))
+                buffer.removeSubrange(buffer.startIndex..<afterNewline)
+            }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            if let error {
+                continuation.finish(throwing: error)
+            } else if statusCode >= 400 {
+                continuation.finish(throwing: UpstreamError.httpError(
+                    statusCode: statusCode,
+                    body: errorBody
+                ))
+            } else {
+                if !buffer.isEmpty {
+                    continuation.yield(buffer)
+                }
+                continuation.finish()
+            }
+            session.finishTasksAndInvalidate()
+        }
+    }
+    #endif
 
     // MARK: - Private Helpers
 
@@ -97,8 +183,11 @@ enum UpstreamClient {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 300
-        // Short connection timeout so tests against unreachable hosts fail fast
+        #if !canImport(FoundationNetworking)
+        // Short connection timeout so tests against unreachable hosts fail fast.
+        // Get-only (and a no-op) on swift-corelibs-foundation, so Darwin-only.
         config.waitsForConnectivity = false
+        #endif
         return URLSession(configuration: config)
     }()
 

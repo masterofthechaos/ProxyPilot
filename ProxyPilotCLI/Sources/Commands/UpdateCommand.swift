@@ -1,5 +1,8 @@
 import ArgumentParser
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 struct UpdateCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -24,7 +27,10 @@ struct UpdateCommand: AsyncParsableCommand {
 
     private static let manifestURL = URL(string: "https://micah.chat/downloads/proxypilot-versions.json")!
     private static let downloadsBaseURL = URL(string: "https://micah.chat/downloads")!
-    private static let updateSession: URLSession = {
+    // nonisolated(unsafe): immutable after init and URLSession is thread-safe;
+    // swift-corelibs-foundation's URLSession lacks the Sendable conformance the
+    // Darwin SDK has, which otherwise rejects this static under Swift 6.
+    nonisolated(unsafe) private static let updateSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 15

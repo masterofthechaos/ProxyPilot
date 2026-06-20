@@ -2,6 +2,8 @@ import Foundation
 
 #if canImport(CryptoKit)
 import CryptoKit
+#elseif canImport(Crypto)
+import Crypto
 #endif
 
 #if canImport(Security)
@@ -378,7 +380,7 @@ public actor InputOutputLogStore {
     }
 
     private func encrypt(_ data: Data) throws -> String {
-        #if canImport(CryptoKit)
+        #if canImport(CryptoKit) || canImport(Crypto)
         guard encryptionKey.count == 32 else {
             throw InputOutputLogStoreError.invalidEncryptionKey
         }
@@ -394,7 +396,7 @@ public actor InputOutputLogStore {
     }
 
     private func decrypt(_ line: String) throws -> Data {
-        #if canImport(CryptoKit)
+        #if canImport(CryptoKit) || canImport(Crypto)
         guard encryptionKey.count == 32 else {
             throw InputOutputLogStoreError.invalidEncryptionKey
         }

@@ -4,12 +4,12 @@ import Darwin
 import Glibc
 #endif
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+import ProxyPilotCore
 
-struct LocalProxyProbeResult {
-    let reachable: Bool
-    let modelCount: Int?
-    let errorMessage: String?
-}
+typealias LocalProxyProbeResult = ProxyProbeResult
 
 struct DaemonLaunchResult {
     let pid: Int32
@@ -65,41 +65,7 @@ enum CLIProxyRuntime {
     }
 
     static func probeProxy(on port: UInt16, timeout: TimeInterval = 1.5) async -> LocalProxyProbeResult {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/v1/models") else {
-            return LocalProxyProbeResult(reachable: false, modelCount: nil, errorMessage: "Invalid local proxy probe URL.")
-        }
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = timeout
-        configuration.timeoutIntervalForResource = timeout
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = timeout
-
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                let status = (response as? HTTPURLResponse)?.statusCode
-                let message = status.map { "HTTP \($0) from /v1/models." } ?? "No HTTP response from /v1/models."
-                return LocalProxyProbeResult(reachable: false, modelCount: nil, errorMessage: message)
-            }
-
-            let modelCount: Int?
-            if let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let models = parsed["data"] as? [[String: Any]] {
-                modelCount = models.count
-            } else {
-                modelCount = nil
-            }
-
-            return LocalProxyProbeResult(reachable: true, modelCount: modelCount, errorMessage: nil)
-        } catch {
-            return LocalProxyProbeResult(reachable: false, modelCount: nil, errorMessage: error.localizedDescription)
-        }
+        await LocalProxyProbe.probe(on: port, timeout: timeout)
     }
 
     static func bindFailureSuggestion(port: UInt16, error: Error) -> String {
@@ -204,12 +170,22 @@ enum CLIProxyRuntime {
 
         let logPath = "/tmp/proxypilot_builtin_proxy.log"
         try? preparePrivateLogFile(at: logPath)
+        // Darwin's posix_spawn types are pointers (declared Optional); Glibc's
+        // are structs, so the spawn API takes non-optional pointers there.
+        #if canImport(Darwin)
         var fileActions: posix_spawn_file_actions_t?
+        #else
+        var fileActions = posix_spawn_file_actions_t()
+        #endif
         posix_spawn_file_actions_init(&fileActions)
         posix_spawn_file_actions_addopen(&fileActions, STDOUT_FILENO, logPath, O_WRONLY | O_CREAT | O_APPEND, mode_t(daemonLogFilePermissions))
         posix_spawn_file_actions_addopen(&fileActions, STDERR_FILENO, logPath, O_WRONLY | O_CREAT | O_APPEND, mode_t(daemonLogFilePermissions))
 
+        #if canImport(Darwin)
         var spawnAttrs: posix_spawnattr_t?
+        #else
+        var spawnAttrs = posix_spawnattr_t()
+        #endif
         posix_spawnattr_init(&spawnAttrs)
         #if canImport(Darwin)
         posix_spawnattr_setflags(&spawnAttrs, Int16(POSIX_SPAWN_SETSID))

@@ -741,4 +741,77 @@ final class SessionHistorySessionTests: XCTestCase {
         XCTAssertEqual(parsed.assistantText, "")
         XCTAssertTrue(parsed.toolCalls.isEmpty)
     }
+
+    func testAllTimeUsageBuildsAllTimeRollup() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+
+        let events = [
+            SessionReportEvent(
+                source: "gui",
+                sessionID: "gui-1",
+                record: RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 100),
+                    model: "gpt-4o",
+                    promptTokens: 100,
+                    completionTokens: 20,
+                    promptCacheHitTokens: 60,
+                    promptCacheMissTokens: 40,
+                    durationSeconds: 1.0,
+                    path: "/v1/chat/completions",
+                    wasStreaming: false
+                )
+            ),
+            SessionReportEvent(
+                source: "gui",
+                sessionID: "gui-1",
+                record: RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 160),
+                    model: "gpt-4o",
+                    promptTokens: 10,
+                    completionTokens: 5,
+                    durationSeconds: 2.0,
+                    path: "/v1/chat/completions",
+                    wasStreaming: true
+                )
+            ),
+            SessionReportEvent(
+                source: "cli",
+                sessionID: "cli-1",
+                record: RequestRecord(
+                    timestamp: Date(timeIntervalSince1970: 86_500),
+                    model: "claude-3.5",
+                    promptTokens: 50,
+                    completionTokens: 25,
+                    promptCacheWriteTokens: 15,
+                    durationSeconds: 4.0,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            )
+        ]
+
+        let usage = AllTimeUsage.build(from: events, calendar: calendar)
+
+        XCTAssertEqual(usage.requestCount, 3)
+        XCTAssertEqual(usage.sessionCount, 2)
+        XCTAssertEqual(usage.totalPromptTokens, 160)
+        XCTAssertEqual(usage.totalCompletionTokens, 50)
+        XCTAssertEqual(usage.totalTokens, 210)
+        XCTAssertEqual(usage.totalTokensFormatted, "210")
+        XCTAssertEqual(usage.totalPromptCacheHitTokens, 60)
+        XCTAssertEqual(usage.totalPromptCacheMissTokens, 40)
+        XCTAssertEqual(usage.totalPromptCacheWriteTokens, 15)
+        XCTAssertTrue(usage.cacheAccountingAvailable)
+        XCTAssertEqual(usage.cacheHitRate ?? -1, 0.6, accuracy: 0.0001)
+        XCTAssertEqual(usage.modelDistribution.map(\.model), ["gpt-4o", "claude-3.5"])
+        XCTAssertEqual(usage.sourceShares.map(\.source), ["gui", "cli"])
+        XCTAssertEqual(usage.longestSession?.id, "gui-1")
+        XCTAssertEqual(usage.busiestSession?.id, "gui-1")
+        XCTAssertEqual(usage.dailyTokenBuckets.count, 2)
+        XCTAssertEqual(usage.averageRequestsPerSession ?? -1, 1.5, accuracy: 0.0001)
+        XCTAssertEqual(usage.averageSessionDurationSeconds ?? -1, 30.0, accuracy: 0.0001)
+        XCTAssertEqual(usage.startedAt, Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(usage.endedAt, Date(timeIntervalSince1970: 86_500))
+    }
 }
