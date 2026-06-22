@@ -90,6 +90,12 @@ final class AppViewModel: ObservableObject {
     private static let xcodeAgentAPIKeyOverrideDefaultsKey = "IDEChatClaudeAgentAPIKeyOverride"
     private static let selectedAgentModeDefaultsKey = "proxypilot.agentModes.selectedMode"
 
+    static func shouldRunLaunchBackgroundWork(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment["XCTestConfigurationFilePath"] == nil
+    }
+
     private static let builtInProxyLogFileURL = URL(fileURLWithPath: "/tmp/proxypilot_builtin_proxy.log")
     private static let toolchainLogFileURL = URL(fileURLWithPath: "/tmp/proxypilot_toolchain.log")
     private static let sessionRequestTimestampFormatter: ISO8601DateFormatter = {
@@ -2591,11 +2597,13 @@ final class AppViewModel: ObservableObject {
 
         providerManager.isInitialized = true
         runPreflightChecks(trackEvent: false)
-        Task { await detectXcodeInstallations() }
-        if upstreamProvider == .openRouter {
-            Task { await providerManager.loadVerifiedModels() }
+        if Self.shouldRunLaunchBackgroundWork() {
+            Task { await detectXcodeInstallations() }
+            if upstreamProvider == .openRouter {
+                Task { await providerManager.loadVerifiedModels() }
+            }
+            Task { await hydrateCurrentProviderModelCacheIfNeeded() }
         }
-        Task { await hydrateCurrentProviderModelCacheIfNeeded() }
 
         applyBackgroundActivationPolicy()
     }
@@ -2645,7 +2653,7 @@ final class AppViewModel: ObservableObject {
 
     private func applyBackgroundActivationPolicy() {
         // Skip under XCTest: mutating the test host's activation policy destabilizes the suite.
-        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        guard Self.shouldRunLaunchBackgroundWork() else { return }
         let policy: NSApplication.ActivationPolicy = runInBackground ? .accessory : .regular
         guard NSApp != nil, NSApp.activationPolicy() != policy else { return }
         NSApp.setActivationPolicy(policy)
@@ -2768,15 +2776,20 @@ final class AppViewModel: ObservableObject {
         }
 
         let latestSessionID = latestExternalEvent.sessionID
+        let newSessionEvents = externalEvents.filter {
+            $0.sessionID == latestSessionID && !importedExternalSessionEventIDs.contains($0.id)
+        }
+        guard !newSessionEvents.isEmpty else { return }
 
-        for event in externalEvents where event.sessionID == latestSessionID && !importedExternalSessionEventIDs.contains(event.id) {
+        for event in newSessionEvents {
             importedExternalSessionEventIDs.insert(event.id)
             importedExternalSessionIDs.insert(event.sessionID)
-            localProxyServer.reportCard.record(event.record)
-            localProxyServer.state.sessionRequestCount = localProxyServer.reportCard.totalRequests
-            if !event.record.model.isEmpty {
-                localProxyServer.state.lastModelSeen = event.record.model
-            }
+        }
+
+        localProxyServer.reportCard.record(newSessionEvents.map(\.record))
+        localProxyServer.state.sessionRequestCount = localProxyServer.reportCard.totalRequests
+        if let lastModel = newSessionEvents.last(where: { !$0.record.model.isEmpty })?.record.model {
+            localProxyServer.state.lastModelSeen = lastModel
         }
     }
 
@@ -3977,6 +3990,13 @@ final class AppViewModel: ObservableObject {
         let upstreamBase = proxyService.normalizedUpstreamAPIBase(from: upstreamAPIBaseURLString) ?? defaultUpstreamBase
 
         let sessionID = UUID().uuidString
+        let inputOutputLogger = inputOutputLoggingPreferencesStore.flatMap { preferencesStore in
+            try? InputOutputLoggingRecorder.productionIfConfigured(
+                source: "gui",
+                sessionID: sessionID,
+                preferencesStore: preferencesStore
+            )
+        }
         let config = LocalProxyServer.Config(
             host: proxy.host,
             port: port,
@@ -3993,7 +4013,7 @@ final class AppViewModel: ObservableObject {
                 ? preferredXcodeAgentModel(from: savedDefaultModels)
                 : preferredModel,
             googleThoughtSignatureStore: provider == .google ? GoogleThoughtSignatureStore() : nil,
-            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "gui", sessionID: sessionID),
+            inputOutputLogger: inputOutputLogger,
             promptCaching: selectedPromptCachingConfiguration
         )
 

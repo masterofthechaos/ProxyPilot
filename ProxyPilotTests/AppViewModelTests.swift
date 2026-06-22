@@ -1620,6 +1620,29 @@ final class AppViewModelTests: XCTestCase {
         ))
     }
 
+    func testLaunchBackgroundWorkIsDisabledForXCTest() {
+        XCTAssertFalse(AppViewModel.shouldRunLaunchBackgroundWork(
+            environment: ["XCTestConfigurationFilePath": "/tmp/test.xctestconfiguration"]
+        ))
+        XCTAssertTrue(AppViewModel.shouldRunLaunchBackgroundWork(environment: [:]))
+    }
+
+    func testProviderModelLookupTracksFetchedModelsByExactAndCaseInsensitiveID() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.providerManager.applyFetchedUpstreamModels([
+            UpstreamModel(
+                id: "Example/Model",
+                contextLength: 128_000,
+                promptPricePer1M: nil,
+                completionPricePer1M: nil
+            )
+        ])
+
+        XCTAssertEqual(vm.providerManager.upstreamModel(for: "Example/Model")?.contextLength, 128_000)
+        XCTAssertEqual(vm.providerManager.upstreamModel(for: "example/model")?.id, "Example/Model")
+        XCTAssertEqual(vm.providerManager.upstreamModel(for: "example/model:exacto")?.id, "Example/Model:exacto")
+    }
+
     private var hostAppBundle: Bundle {
         guard let testHost = ProcessInfo.processInfo.environment["TEST_HOST"] else {
             var candidate = Bundle.main.bundleURL
@@ -1667,6 +1690,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(config.upstreamProvider, .openAI)
         XCTAssertEqual(config.upstreamAPIBase.absoluteString, "https://api.together.xyz/v1")
         XCTAssertEqual(config.upstreamAPIKey, "sk-custom")
+        XCTAssertNil(config.inputOutputLogger)
     }
 
     func testCustomProviderModelStateDoesNotReuseOpenAIState() throws {

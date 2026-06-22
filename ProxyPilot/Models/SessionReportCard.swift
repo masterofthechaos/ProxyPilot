@@ -189,6 +189,29 @@ final class SessionReportCard: ObservableObject {
         ))
     }
 
+    func record(_ entries: [ProxyPilotCore.RequestRecord]) {
+        guard !entries.isEmpty else { return }
+        if firstRequestTimestamp == nil {
+            firstRequestTimestamp = entries.first?.timestamp
+        }
+
+        let mapped = entries.map { entry in
+            RequestRecord(
+                timestamp: entry.timestamp,
+                model: entry.model,
+                promptTokens: entry.promptTokens,
+                completionTokens: entry.completionTokens,
+                promptCacheHitTokens: entry.promptCacheHitTokens,
+                promptCacheMissTokens: entry.promptCacheMissTokens,
+                promptCacheWriteTokens: entry.promptCacheWriteTokens,
+                durationSeconds: entry.durationSeconds,
+                path: entry.path,
+                wasStreaming: entry.wasStreaming
+            )
+        }
+        requests = Array((requests + mapped).suffix(Self.maxRetainedRequests))
+    }
+
     func reset() {
         requests.removeAll()
         firstRequestTimestamp = nil

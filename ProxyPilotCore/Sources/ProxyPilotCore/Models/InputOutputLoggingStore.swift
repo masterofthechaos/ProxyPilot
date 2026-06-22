@@ -415,9 +415,18 @@ public actor InputOutputLogStore {
 public enum InputOutputLogKeyProvider {
     public static let keychainAccount = "INPUT_OUTPUT_LOGGING_KEY"
 
+    static func keychainServiceName(environment: [String: String] = ProcessInfo.processInfo.environment) -> String {
+        let serviceOverride = environment[SecretsProviderFactory.keychainServiceEnvVar]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let serviceOverride, !serviceOverride.isEmpty {
+            return serviceOverride
+        }
+        return "proxypilot"
+    }
+
     public static func loadExisting() throws -> Data? {
         #if canImport(Security)
-        let secrets = KeychainSecretsProvider()
+        let secrets = KeychainSecretsProvider(service: keychainServiceName())
         guard let existing = try secrets.get(key: keychainAccount) else {
             return nil
         }
@@ -436,7 +445,7 @@ public enum InputOutputLogKeyProvider {
             return data
         }
 
-        let secrets = KeychainSecretsProvider()
+        let secrets = KeychainSecretsProvider(service: keychainServiceName())
         var bytes = [UInt8](repeating: 0, count: 32)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         guard status == errSecSuccess else {

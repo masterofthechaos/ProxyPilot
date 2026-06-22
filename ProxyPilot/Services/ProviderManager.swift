@@ -69,7 +69,9 @@ final class ProviderManager: ObservableObject {
         }
     }
 
-    @Published var upstreamModels: [UpstreamModel] = []
+    @Published var upstreamModels: [UpstreamModel] = [] {
+        didSet { rebuildUpstreamModelLookup() }
+    }
     @Published var selectedUpstreamModels: Set<String> = []
 
     @Published var selectedXcodeAgentModel: String = "" {
@@ -116,6 +118,8 @@ final class ProviderManager: ObservableObject {
     // MARK: - Internal State
 
     var isInitialized = false
+    private var upstreamModelsByID: [String: UpstreamModel] = [:]
+    private var upstreamModelsByLowercasedID: [String: UpstreamModel] = [:]
 
     // MARK: - Key Test State
 
@@ -153,6 +157,7 @@ final class ProviderManager: ObservableObject {
         }
 
         upstreamModels = Self.cachedUpstreamModels(from: defaults, provider: upstreamProvider)
+        rebuildUpstreamModelLookup()
         selectedUpstreamModels.formUnion(savedDefaultModelSet)
     }
 
@@ -457,23 +462,31 @@ final class ProviderManager: ObservableObject {
     }
 
     func upstreamModel(for id: String) -> UpstreamModel? {
-        if let direct = upstreamModels.first(where: { $0.id == id }) {
+        if let direct = upstreamModelsByID[id] {
             return mergedKnownMetadata(for: direct)
         }
         if id.hasSuffix(":exacto"),
-           let base = upstreamModels.first(where: { $0.id == String(id.dropLast(":exacto".count)) }) {
+           let base = upstreamModelsByID[String(id.dropLast(":exacto".count))] {
             return mergedKnownMetadata(for: base).exactoVariant
         }
         let lower = id.lowercased()
-        if let caseInsensitive = upstreamModels.first(where: { $0.id.lowercased() == lower }) {
+        if let caseInsensitive = upstreamModelsByLowercasedID[lower] {
             return mergedKnownMetadata(for: caseInsensitive)
         }
         if lower.hasSuffix(":exacto") {
             let baseLower = String(lower.dropLast(":exacto".count))
-            return upstreamModels.first { $0.id.lowercased() == baseLower }
+            return upstreamModelsByLowercasedID[baseLower]
                 .map { mergedKnownMetadata(for: $0).exactoVariant }
         }
         return upstreamProvider.knownModelMetadata(for: id)
+    }
+
+    private func rebuildUpstreamModelLookup() {
+        upstreamModelsByID = Dictionary(upstreamModels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        upstreamModelsByLowercasedID = Dictionary(
+            upstreamModels.map { ($0.id.lowercased(), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     private func mergedKnownMetadata(for model: UpstreamModel) -> UpstreamModel {

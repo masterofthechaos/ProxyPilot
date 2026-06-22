@@ -2,6 +2,16 @@ import XCTest
 @testable import ProxyPilotCore
 
 final class InputOutputLoggingStoreTests: XCTestCase {
+    func testLogKeyProviderUsesOverriddenKeychainServiceName() {
+        XCTAssertEqual(
+            InputOutputLogKeyProvider.keychainServiceName(
+                environment: [SecretsProviderFactory.keychainServiceEnvVar: " proxypilot.tests.logging "]
+            ),
+            "proxypilot.tests.logging"
+        )
+        XCTAssertEqual(InputOutputLogKeyProvider.keychainServiceName(environment: [:]), "proxypilot")
+    }
+
     func testOutputTruncatedFlagRoundTripsThroughEncryptedStore() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

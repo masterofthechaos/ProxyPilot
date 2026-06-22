@@ -1,3 +1,5 @@
+import Combine
+import ProxyPilotCore
 import XCTest
 @testable import ProxyPilot
 
@@ -192,6 +194,32 @@ final class SessionReportCardTests: XCTestCase {
         XCTAssertEqual(card.requests.count, 500)
         XCTAssertEqual(card.requests.first?.model, "model-10")
         XCTAssertEqual(card.sessionStartTime, Date(timeIntervalSince1970: 0))
+    }
+
+    func testBatchRecordPublishesOnceAndKeepsMostRecent500() {
+        let card = SessionReportCard()
+        var publicationCount = 0
+        let cancellable = card.objectWillChange.sink { publicationCount += 1 }
+        let records = (0..<510).map { index in
+            ProxyPilotCore.RequestRecord(
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                model: "model-\(index)",
+                promptTokens: 1,
+                completionTokens: 1,
+                durationSeconds: 0.1,
+                path: "/v1/messages",
+                wasStreaming: true
+            )
+        }
+
+        card.record(records)
+
+        XCTAssertEqual(publicationCount, 1)
+        XCTAssertEqual(card.requests.count, 500)
+        XCTAssertEqual(card.requests.first?.model, "model-10")
+        XCTAssertEqual(card.requests.last?.model, "model-509")
+        XCTAssertEqual(card.sessionStartTime, Date(timeIntervalSince1970: 0))
+        withExtendedLifetime(cancellable) {}
     }
 
     func testCacheAccountingAvailableIncludesWriteOnlyTelemetry() {
