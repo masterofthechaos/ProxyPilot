@@ -101,7 +101,7 @@ final class CopilotSidecarServiceTests: XCTestCase {
         XCTAssertTrue(status.loginCommandDescription.contains("GitHub CLI fallback"))
     }
 
-    func testStatusDetectsCompletedGitHubCLIAuthentication() async {
+    func testStatusDetectsGitHubCLIAuthenticatedButCopilotCLIMissing() async {
         let service = makeService(
             endpointResponding: false,
             shellRunner: { command in
@@ -126,8 +126,38 @@ final class CopilotSidecarServiceTests: XCTestCase {
 
         XCTAssertTrue(status.isGitHubAuthenticated)
         XCTAssertEqual(status.githubAccount, "masterofthechaos")
-        XCTAssertNil(status.loginCommand)
+        XCTAssertEqual(status.loginCommand, "npm install -g @github/copilot")
         XCTAssertTrue(status.loginCommandDescription.contains("Signed in to GitHub as masterofthechaos"))
+        XCTAssertTrue(status.loginCommandDescription.contains("separate GitHub Copilot CLI"))
+    }
+
+    func testStatusDetectsCompletedGitHubAndCopilotCLIAuthentication() async {
+        let service = makeService(
+            endpointResponding: false,
+            shellRunner: { command in
+                if command.contains("command -v copilot") {
+                    return .init(terminationStatus: 0, stdout: "/opt/homebrew/bin/copilot\n", stderr: "")
+                }
+                if command.contains("command -v gh") {
+                    return .init(terminationStatus: 0, stdout: "/opt/homebrew/bin/gh\n", stderr: "")
+                }
+                if command.contains("gh auth status") {
+                    return .init(
+                        terminationStatus: 0,
+                        stdout: "github.com\n  ✓ Logged in to github.com account masterofthechaos (keyring)\n",
+                        stderr: ""
+                    )
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+
+        let status = await service.status()
+
+        XCTAssertTrue(status.isGitHubAuthenticated)
+        XCTAssertEqual(status.githubAccount, "masterofthechaos")
+        XCTAssertNil(status.loginCommand)
+        XCTAssertTrue(status.loginCommandDescription.contains("Copilot CLI is installed"))
     }
 
     func testStatusEndpointRespondingExternally() async {
@@ -139,6 +169,124 @@ final class CopilotSidecarServiceTests: XCTestCase {
         XCTAssertTrue(status.isExternal)
         XCTAssertFalse(status.isManaged)
         XCTAssertTrue(status.message.contains("started elsewhere"))
+    }
+
+    func testCheckForUpdateReportsUpdateAvailable() async {
+        let service = makeService(
+            endpointResponding: false,
+            commandRunner: { _, arguments in
+                if arguments == ["--version"] {
+                    return .init(terminationStatus: 0, stdout: "5.0.1\n", stderr: "")
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            },
+            shellRunner: { command in
+                if command.contains("npm view xcode-copilot-server version") {
+                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+
+        let status = await service.checkForUpdate()
+
+        XCTAssertEqual(status.installedVersion, "5.0.1")
+        XCTAssertEqual(status.latestVersion, "5.0.2")
+        XCTAssertTrue(status.updateAvailable)
+    }
+
+    func testCheckForUpdateReportsUpToDate() async {
+        let service = makeService(
+            endpointResponding: false,
+            commandRunner: { _, arguments in
+                if arguments == ["--version"] {
+                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            },
+            shellRunner: { command in
+                if command.contains("npm view xcode-copilot-server version") {
+                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+
+        let status = await service.checkForUpdate()
+
+        XCTAssertFalse(status.updateAvailable)
+    }
+
+    func testCheckForUpdateHandlesUnreachableRegistry() async {
+        let service = makeService(
+            endpointResponding: false,
+            commandRunner: { _, arguments in
+                if arguments == ["--version"] {
+                    return .init(terminationStatus: 0, stdout: "5.0.1\n", stderr: "")
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            },
+            shellRunner: { _ in .init(terminationStatus: 1, stdout: "", stderr: "network unreachable") }
+        )
+
+        let status = await service.checkForUpdate()
+
+        XCTAssertEqual(status.installedVersion, "5.0.1")
+        XCTAssertNil(status.latestVersion)
+        XCTAssertFalse(status.updateAvailable)
+    }
+
+    func testUpdateToLatestThrowsOnFailure() async {
+        let service = makeService(
+            endpointResponding: false,
+            shellRunner: { _ in .init(terminationStatus: 1, stdout: "", stderr: "EACCES: permission denied") }
+        )
+
+        do {
+            try await service.updateToLatest()
+            XCTFail("Expected update to throw")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("EACCES"))
+        }
+    }
+
+    func testIsVersionNewerThanComparesNumerically() {
+        XCTAssertTrue(CopilotSidecarService.isVersion("5.0.2", newerThan: "5.0.1"))
+        XCTAssertTrue(CopilotSidecarService.isVersion("5.10.0", newerThan: "5.9.0"))
+        XCTAssertFalse(CopilotSidecarService.isVersion("5.0.1", newerThan: "5.0.2"))
+        XCTAssertFalse(CopilotSidecarService.isVersion("5.0.1", newerThan: "5.0.1"))
+        XCTAssertFalse(CopilotSidecarService.isVersion("5.0.1-beta", newerThan: "5.0.2"))
+    }
+
+    func testRecentFailureDetailReadsFatalErrorFromLog() throws {
+        let logURL = URL(fileURLWithPath: "/tmp/proxypilot_copilot_sidecar.log")
+        let originalData = try? Data(contentsOf: logURL)
+        try? FileManager.default.removeItem(at: logURL)
+        defer {
+            try? FileManager.default.removeItem(at: logURL)
+            if let originalData {
+                try? originalData.write(to: logURL)
+            }
+        }
+
+        try "Fatal error: Error: Copilot CLI not found at /opt/homebrew/lib/node_modules/xcode-copilot-server/node_modules/@github/index.js. Ensure @github/copilot is installed.\n"
+            .write(to: logURL, atomically: true, encoding: .utf8)
+
+        let service = CopilotSidecarService(
+            executableResolver: { URL(fileURLWithPath: "/tmp/xcode-copilot-server") },
+            endpointProbe: { false },
+            commandRunner: { _, _ in .init(terminationStatus: 0, stdout: "", stderr: "") },
+            shellRunner: { _ in .init(terminationStatus: 1, stdout: "", stderr: "") },
+            fileExists: { FileManager.default.fileExists(atPath: $0) },
+            workspaceOpener: { _ in }
+        )
+
+        let detail = service.recentFailureDetail()
+
+        XCTAssertEqual(
+            detail,
+            "Fatal error: Error: Copilot CLI not found at /opt/homebrew/lib/node_modules/xcode-copilot-server/node_modules/@github/index.js. Ensure @github/copilot is installed."
+        )
     }
 
     func testUninstallAgentUsesHelperCommand() async throws {

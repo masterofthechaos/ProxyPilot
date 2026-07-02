@@ -814,4 +814,69 @@ final class SessionHistorySessionTests: XCTestCase {
         XCTAssertEqual(usage.startedAt, Date(timeIntervalSince1970: 100))
         XCTAssertEqual(usage.endedAt, Date(timeIntervalSince1970: 86_500))
     }
+
+    func testSessionHistoryFileExportCSVHasHeaderAndOneRowPerRequest() {
+        let requests = [
+            ProxyPilotCore.RequestRecord(
+                timestamp: Date(timeIntervalSince1970: 100),
+                model: "glm-5",
+                promptTokens: 10,
+                completionTokens: 5,
+                promptCacheHitTokens: 3,
+                promptCacheMissTokens: 7,
+                promptCacheWriteTokens: nil,
+                durationSeconds: 1.5,
+                path: "/v1/messages",
+                wasStreaming: true
+            ),
+            ProxyPilotCore.RequestRecord(
+                timestamp: Date(timeIntervalSince1970: 200),
+                model: "gpt-4o",
+                promptTokens: 20,
+                completionTokens: 8,
+                promptCacheHitTokens: nil,
+                promptCacheMissTokens: nil,
+                promptCacheWriteTokens: nil,
+                durationSeconds: 0.75,
+                path: "/v1/chat, with comma",
+                wasStreaming: false
+            )
+        ]
+        let session = SessionHistorySession(id: "session-csv", source: "cli", requests: requests)
+
+        let csv = SessionHistoryFileExport.csv(for: session)
+        let lines = csv.components(separatedBy: "\r\n")
+
+        XCTAssertEqual(lines.first, SessionHistoryFileExport.csvHeader)
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertTrue(lines[1].hasPrefix("session-csv,cli,"))
+        XCTAssertTrue(lines[1].contains("glm-5"))
+        XCTAssertTrue(lines[2].contains("\"/v1/chat, with comma\""), "Fields containing commas must be quoted")
+    }
+
+    func testSessionHistoryFileExportJSONMatchesEncodedSessionShape() throws {
+        let requests = [
+            ProxyPilotCore.RequestRecord(
+                timestamp: Date(timeIntervalSince1970: 100),
+                model: "glm-5",
+                promptTokens: 10,
+                completionTokens: 5,
+                durationSeconds: 1.5,
+                path: "/v1/messages",
+                wasStreaming: true
+            )
+        ]
+        let session = SessionHistorySession(id: "session-json", source: "gui", requests: requests)
+
+        let json = try SessionHistoryFileExport.json(for: session)
+        let data = try XCTUnwrap(json.data(using: .utf8))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(SessionHistorySessionExport.self, from: data)
+
+        XCTAssertEqual(decoded.sessionID, "session-json")
+        XCTAssertEqual(decoded.source, "gui")
+        XCTAssertEqual(decoded.requestCount, 1)
+        XCTAssertEqual(decoded.requests.first?.model, "glm-5")
+    }
 }

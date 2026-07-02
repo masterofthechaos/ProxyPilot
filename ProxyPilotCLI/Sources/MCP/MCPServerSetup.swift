@@ -394,6 +394,21 @@ enum MCPServerSetup {
                     )
                 ),
                 Tool(
+                    name: "get_session_history",
+                    title: "Get Session History",
+                    description: "List recorded proxy sessions, or show one session's request history and (optionally) its decrypted input/output logs. Omit session_id to list all recorded sessions.",
+                    inputSchema: jsonSchemaObject(properties: [
+                        "session_id": stringProp("Session ID to show details for. Omit to list all recorded sessions."),
+                        "include_logs": boolProp("When session_id is provided, also include decrypted input/output log records if input & output logging is enabled (default: false)."),
+                    ]),
+                    annotations: .init(
+                        readOnlyHint: true,
+                        destructiveHint: false,
+                        idempotentHint: true,
+                        openWorldHint: false
+                    )
+                ),
+                Tool(
                     name: "proxy_logs",
                     title: "Read Proxy Logs",
                     description: "Read recent proxy log lines with secrets redacted.",
@@ -1132,6 +1147,61 @@ enum MCPServerSetup {
                     ),
                     text: text
                 )
+
+            case "get_session_history":
+                let sessionIDArgument = stringArgument(params.arguments, name: "session_id", default: nil, tool: "get_session_history")
+                if let error = sessionIDArgument.error { return error }
+
+                let includeLogsValidation = MCPArgumentValidator.bool(
+                    params.arguments?["include_logs"],
+                    default: false,
+                    name: "include_logs",
+                    tool: "get_session_history"
+                )
+                guard case .success(let includeLogs) = includeLogsValidation else {
+                    if case .failure(let code, let message) = includeLogsValidation {
+                        return toolError(tool: "get_session_history", code: code, message: message)
+                    }
+                    return toolError(tool: "get_session_history", code: "E035", message: "Invalid include_logs argument.")
+                }
+
+                let sessionEvents = (try? SessionReportStore.readEvents()) ?? []
+
+                if let sessionID = sessionIDArgument.value {
+                    let matching = sessionEvents.filter { $0.sessionID == sessionID }
+                    guard let summary = SessionSummaryPayload.build(from: matching).first else {
+                        return toolError(
+                            tool: "get_session_history",
+                            code: "E060",
+                            message: "No recorded session found with ID '\(sessionID)'.",
+                            suggestion: "Call get_session_history without session_id to see recorded session IDs."
+                        )
+                    }
+                    let requests = matching.sorted { $0.record.timestamp < $1.record.timestamp }.map(\.record)
+
+                    var logs: [InputOutputLogRecord]?
+                    if includeLogs {
+                        if let recorder = try? InputOutputLoggingRecorder.productionIfKeyExists(source: "mcp") {
+                            logs = (try? await recorder.readRecords(matchingSessionID: sessionID)) ?? []
+                        } else {
+                            logs = []
+                        }
+                    }
+
+                    let logsSuffix = logs.map { ", \($0.count) input/output log record(s)" } ?? ""
+                    return toolSuccess(
+                        tool: "get_session_history",
+                        data: SessionDetailPayload(summary: summary, requests: requests, logs: logs),
+                        text: "Session \(summary.id): \(summary.requestCount) request(s), \(summary.totalTokens) tokens\(logsSuffix)"
+                    )
+                } else {
+                    let summaries = SessionSummaryPayload.build(from: sessionEvents)
+                    return toolSuccess(
+                        tool: "get_session_history",
+                        data: SessionsListPayload(sessions: summaries),
+                        text: summaries.isEmpty ? "No recorded sessions yet." : "\(summaries.count) recorded session(s)."
+                    )
+                }
 
             case "proxy_logs":
                 let lineCountValidation = MCPArgumentValidator.lineCount(

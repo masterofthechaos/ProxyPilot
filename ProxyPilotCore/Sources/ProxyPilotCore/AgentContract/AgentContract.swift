@@ -146,6 +146,7 @@ public enum AgentJSON {
     public static func encode<T: Encodable>(_ value: T) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(value)
         return String(decoding: data, as: UTF8.self)
     }
@@ -399,6 +400,90 @@ public struct AgentPreflightPayload: Encodable, Equatable, Sendable {
         self.proxy = proxy
         self.xcodeConfig = xcodeConfig
         self.blockers = blockers
+    }
+}
+
+public struct SessionSummaryPayload: Encodable, Equatable, Sendable {
+    public let id: String
+    public let source: String
+    public let requestCount: Int
+    public let totalPromptTokens: Int
+    public let totalCompletionTokens: Int
+    public let totalTokens: Int
+    public let startedAt: Date?
+    public let endedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case source
+        case requestCount = "request_count"
+        case totalPromptTokens = "total_prompt_tokens"
+        case totalCompletionTokens = "total_completion_tokens"
+        case totalTokens = "total_tokens"
+        case startedAt = "started_at"
+        case endedAt = "ended_at"
+    }
+
+    public init(
+        id: String,
+        source: String,
+        requestCount: Int,
+        totalPromptTokens: Int,
+        totalCompletionTokens: Int,
+        totalTokens: Int,
+        startedAt: Date?,
+        endedAt: Date?
+    ) {
+        self.id = id
+        self.source = source
+        self.requestCount = requestCount
+        self.totalPromptTokens = totalPromptTokens
+        self.totalCompletionTokens = totalCompletionTokens
+        self.totalTokens = totalTokens
+        self.startedAt = startedAt
+        self.endedAt = endedAt
+    }
+
+    /// Groups raw session report events into per-session summaries, newest-first by end time.
+    public static func build(from events: [SessionReportEvent]) -> [SessionSummaryPayload] {
+        Dictionary(grouping: events, by: \.sessionID)
+            .map { sessionID, events -> SessionSummaryPayload in
+                let sorted = events.sorted { $0.record.timestamp < $1.record.timestamp }
+                let source = sorted.first?.source ?? "unknown"
+                let totalPromptTokens = sorted.reduce(0) { $0 + $1.record.promptTokens }
+                let totalCompletionTokens = sorted.reduce(0) { $0 + $1.record.completionTokens }
+                return SessionSummaryPayload(
+                    id: sessionID,
+                    source: source,
+                    requestCount: sorted.count,
+                    totalPromptTokens: totalPromptTokens,
+                    totalCompletionTokens: totalCompletionTokens,
+                    totalTokens: totalPromptTokens + totalCompletionTokens,
+                    startedAt: sorted.first?.record.timestamp,
+                    endedAt: sorted.last?.record.timestamp
+                )
+            }
+            .sorted { ($0.endedAt ?? .distantPast) > ($1.endedAt ?? .distantPast) }
+    }
+}
+
+public struct SessionsListPayload: Encodable, Equatable, Sendable {
+    public let sessions: [SessionSummaryPayload]
+
+    public init(sessions: [SessionSummaryPayload]) {
+        self.sessions = sessions
+    }
+}
+
+public struct SessionDetailPayload: Encodable, Equatable, Sendable {
+    public let summary: SessionSummaryPayload
+    public let requests: [RequestRecord]
+    public let logs: [InputOutputLogRecord]?
+
+    public init(summary: SessionSummaryPayload, requests: [RequestRecord], logs: [InputOutputLogRecord]?) {
+        self.summary = summary
+        self.requests = requests
+        self.logs = logs
     }
 }
 

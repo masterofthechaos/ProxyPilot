@@ -3,16 +3,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-DERIVED_DATA="/tmp/ProxyPilotDerived"
+source scripts/release_channel.sh
 
-echo "Building Release to $DERIVED_DATA ..."
+CHANNEL="$(pp_require_release_channel "${1:-stable}")"
+DERIVED_DATA="/tmp/ProxyPilotDerived-${CHANNEL}"
+CONFIGURATION="$(pp_release_configuration "${CHANNEL}")"
+APP_WRAPPER_NAME="$(pp_app_wrapper_name "${CHANNEL}")"
+
+echo "Building ${CHANNEL} Release to $DERIVED_DATA ..."
 xcodebuild \
   -project ProxyPilot.xcodeproj \
   -scheme ProxyPilot-macOS \
-  -configuration Release \
+  -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED_DATA" \
   build \
   >/dev/null
 
-APP_PATH="$DERIVED_DATA/Build/Products/Release/ProxyPilot.app"
+APP_PATH="$DERIVED_DATA/Build/Products/$CONFIGURATION/$APP_WRAPPER_NAME"
 echo "Built: $APP_PATH"

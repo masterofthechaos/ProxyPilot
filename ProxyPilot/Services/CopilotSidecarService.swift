@@ -35,6 +35,12 @@ final class CopilotSidecarService {
         let summary: String
     }
 
+    struct VersionStatus: Sendable, Equatable {
+        let installedVersion: String?
+        let latestVersion: String?
+        let updateAvailable: Bool
+    }
+
     struct DirectProcessLaunch {
         let process: Process
         let logHandle: FileHandle
@@ -233,6 +239,58 @@ final class CopilotSidecarService {
         }
     }
 
+    func checkForUpdate() async -> VersionStatus {
+        let installed = await installedVersion()
+        let latest = await latestPublishedVersion()
+        let updateAvailable: Bool
+        if let installed, let latest {
+            updateAvailable = Self.isVersion(latest, newerThan: installed)
+        } else {
+            updateAvailable = false
+        }
+        return VersionStatus(installedVersion: installed, latestVersion: latest, updateAvailable: updateAvailable)
+    }
+
+    func installedVersion() async -> String? {
+        guard let executable = await findExecutable() else { return nil }
+        let result = await commandRunner(executable, ["--version"])
+        guard result.terminationStatus == 0 else { return nil }
+        let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func latestPublishedVersion() async -> String? {
+        let result = await shellRunner("npm view xcode-copilot-server version")
+        guard result.terminationStatus == 0 else { return nil }
+        let trimmed = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func updateToLatest() async throws {
+        let command = "npm install -g xcode-copilot-server@latest"
+        let result = await shellRunner(command)
+        guard result.terminationStatus == 0 else {
+            throw SidecarError.commandFailed(command: command, stderr: result.combinedOutput)
+        }
+    }
+
+    static func isVersion(_ candidate: String, newerThan baseline: String) -> Bool {
+        func components(_ value: String) -> [Int] {
+            value.split(separator: ".").map { segment in
+                Int(segment.prefix(while: \.isNumber)) ?? 0
+            }
+        }
+        let candidateParts = components(candidate)
+        let baselineParts = components(baseline)
+        let count = max(candidateParts.count, baselineParts.count)
+        for index in 0..<count {
+            let c = index < candidateParts.count ? candidateParts[index] : 0
+            let b = index < baselineParts.count ? baselineParts[index] : 0
+            if c != b { return c > b }
+        }
+        return false
+    }
+
     func openLog() {
         let existingLogs = allLogURLs.filter { fileExists($0.path) }
         workspaceOpener(existingLogs.isEmpty ? [launchAgentOutLogURL] : existingLogs)
@@ -264,6 +322,21 @@ final class CopilotSidecarService {
             text: chunks.joined(separator: "\n\n"),
             summary: "Showing \(fileCount) Copilot sidecar log file\(fileCount == 1 ? "" : "s")."
         )
+    }
+
+    func recentFailureDetail() -> String? {
+        let candidates = [launchAgentErrLogURL, directLogURL]
+        for url in candidates where fileExists(url.path) {
+            guard let text = readLogTail(from: url, maxBytes: 4_000)?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { continue }
+            let errorLine = text.split(separator: "\n").last { line in
+                line.contains("Fatal error") || line.contains("Error:")
+            }
+            if let errorLine {
+                return String(errorLine)
+            }
+        }
+        return nil
     }
 
     private func readLogTail(from url: URL, maxBytes: Int) -> String? {
@@ -354,20 +427,31 @@ final class CopilotSidecarService {
     }
 
     private func preferredLoginCommand() async -> LoginCommand {
-        if await shellCommandExists("gh") {
+        let copilotCLIExists = await shellCommandExists("copilot")
+        let ghExists = await shellCommandExists("gh")
+
+        if ghExists {
             let authStatus = await githubCLIAuthenticationStatus()
             if authStatus.isAuthenticated {
                 let accountText = authStatus.account.map { " as \($0)" } ?? ""
+                if copilotCLIExists {
+                    return LoginCommand(
+                        command: nil,
+                        description: "Signed in to GitHub\(accountText) via GitHub CLI, and the Copilot CLI is installed. If the helper still can't reach Copilot, run `copilot login` in Terminal — GitHub CLI sign-in alone does not authenticate the Copilot CLI.",
+                        isAuthenticated: true,
+                        account: authStatus.account
+                    )
+                }
                 return LoginCommand(
-                    command: nil,
-                    description: "Signed in to GitHub\(accountText) via GitHub CLI. ProxyPilot can now try the Copilot helper; Copilot access is checked separately by GitHub.",
+                    command: "npm install -g @github/copilot",
+                    description: "Signed in to GitHub\(accountText) via GitHub CLI. The Copilot helper also requires the separate GitHub Copilot CLI — install it, then run `copilot login` to authenticate.",
                     isAuthenticated: true,
                     account: authStatus.account
                 )
             }
         }
 
-        if await shellCommandExists("copilot") {
+        if copilotCLIExists {
             return LoginCommand(
                 command: "copilot login",
                 description: "Authenticate GitHub Copilot first. ProxyPilot will open Terminal and run the Copilot CLI device-login flow.",
@@ -376,7 +460,7 @@ final class CopilotSidecarService {
             )
         }
 
-        if await shellCommandExists("gh") {
+        if ghExists {
             return LoginCommand(
                 command: "gh auth login",
                 description: "Authenticate GitHub first. xcode-copilot-server can use GitHub CLI fallback auth when Copilot CLI is not installed.",
@@ -524,6 +608,14 @@ final class CopilotSidecarService {
             .replacingOccurrences(of: "\"", with: "\\\"")
     }
 
+    private nonisolated static func augmentedEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let extraPaths = "/opt/homebrew/bin:/usr/local/bin"
+        let existing = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = "\(extraPaths):\(existing)"
+        return env
+    }
+
     private static func runCommand(executablePath: String, arguments: [String]) async -> CommandResult {
         await Task.detached {
             let process = Process()
@@ -531,6 +623,7 @@ final class CopilotSidecarService {
             let stderr = Pipe()
             process.executableURL = URL(fileURLWithPath: executablePath)
             process.arguments = arguments
+            process.environment = augmentedEnvironment()
             process.standardOutput = stdout
             process.standardError = stderr
 
@@ -567,6 +660,7 @@ final class CopilotSidecarService {
         let newProcess = Process()
         newProcess.executableURL = executable
         newProcess.arguments = arguments
+        newProcess.environment = augmentedEnvironment()
         newProcess.standardOutput = logHandle
         newProcess.standardError = logHandle
         do {

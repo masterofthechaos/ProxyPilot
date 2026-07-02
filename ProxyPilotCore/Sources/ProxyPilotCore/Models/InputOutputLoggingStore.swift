@@ -19,6 +19,8 @@ public enum InputOutputLoggingRetention: String, Sendable, Codable, CaseIterable
     case sixHours
     case twelveHours
     case twentyFourHoursMaximum
+    case sevenDays
+    case thirtyDays
 
     public var durationSeconds: TimeInterval? {
         switch self {
@@ -36,11 +38,15 @@ public enum InputOutputLoggingRetention: String, Sendable, Codable, CaseIterable
             return 12 * 60 * 60
         case .twentyFourHoursDefault, .twentyFourHoursMaximum:
             return 24 * 60 * 60
+        case .sevenDays:
+            return 7 * 24 * 60 * 60
+        case .thirtyDays:
+            return 30 * 24 * 60 * 60
         }
     }
 
     public func expirationDate(from timestamp: Date) -> Date? {
-        durationSeconds.map { timestamp.addingTimeInterval(min($0, 24 * 60 * 60)) }
+        durationSeconds.map { timestamp.addingTimeInterval($0) }
     }
 }
 
@@ -51,6 +57,7 @@ public struct InputOutputLoggingPreferences: Sendable, Codable, Equatable {
     public var cliEnabled: Bool
     public var retention: InputOutputLoggingRetention
     public var externalStorageEnabled: Bool
+    public var externalStoragePath: String?
 
     public init(
         enabled: Bool = false,
@@ -58,7 +65,8 @@ public struct InputOutputLoggingPreferences: Sendable, Codable, Equatable {
         recordOutputs: Bool = false,
         cliEnabled: Bool = false,
         retention: InputOutputLoggingRetention = .twentyFourHoursDefault,
-        externalStorageEnabled: Bool = false
+        externalStorageEnabled: Bool = false,
+        externalStoragePath: String? = nil
     ) {
         self.enabled = enabled
         self.recordInputs = recordInputs
@@ -66,6 +74,19 @@ public struct InputOutputLoggingPreferences: Sendable, Codable, Equatable {
         self.cliEnabled = cliEnabled
         self.retention = retention
         self.externalStorageEnabled = externalStorageEnabled
+        self.externalStoragePath = externalStoragePath
+    }
+
+    /// Decodes older persisted preferences that predate `externalStoragePath`.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        recordInputs = try container.decode(Bool.self, forKey: .recordInputs)
+        recordOutputs = try container.decode(Bool.self, forKey: .recordOutputs)
+        cliEnabled = try container.decode(Bool.self, forKey: .cliEnabled)
+        retention = try container.decode(InputOutputLoggingRetention.self, forKey: .retention)
+        externalStorageEnabled = try container.decode(Bool.self, forKey: .externalStorageEnabled)
+        externalStoragePath = try container.decodeIfPresent(String.self, forKey: .externalStoragePath)
     }
 
     public func isEffective(for source: String) -> Bool {
@@ -264,6 +285,46 @@ public actor InputOutputLogStore {
             .appendingPathComponent("proxypilot", isDirectory: true)
             .appendingPathComponent("input-output-logging", isDirectory: true)
             .appendingPathComponent("records.jsonl.enc")
+    }
+
+    /// Resolves where records should be stored given the user's preferences,
+    /// consulting a configured external location before falling back to
+    /// Application Support. Re-checked on every call rather than cached, so an
+    /// override that becomes unreachable (unmounted volume, revoked permission)
+    /// falls back automatically without requiring a settings change.
+    public static func resolvedURL(preferences: InputOutputLoggingPreferences) -> URL {
+        guard let directory = reachableExternalStorageDirectory(preferences: preferences) else {
+            return defaultURL
+        }
+        return directory.appendingPathComponent("records.jsonl.enc")
+    }
+
+    /// `true` when no override is configured, or when the configured override
+    /// directory currently exists and is writable. `false` means the caller is
+    /// about to fall back to Application Support and should surface a warning.
+    public static func isExternalStorageOverrideReachable(preferences: InputOutputLoggingPreferences) -> Bool {
+        guard preferences.externalStorageEnabled,
+              let path = preferences.externalStoragePath,
+              !path.isEmpty else {
+            return true
+        }
+        return reachableExternalStorageDirectory(preferences: preferences) != nil
+    }
+
+    private static func reachableExternalStorageDirectory(preferences: InputOutputLoggingPreferences) -> URL? {
+        guard preferences.externalStorageEnabled,
+              let path = preferences.externalStoragePath,
+              !path.isEmpty else {
+            return nil
+        }
+        let directory = URL(fileURLWithPath: path, isDirectory: true)
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue,
+              FileManager.default.isWritableFile(atPath: directory.path) else {
+            return nil
+        }
+        return directory
     }
 
     public func append(_ record: InputOutputLogRecord) throws {
@@ -487,13 +548,25 @@ public struct InputOutputLoggingRecorder: Sendable {
     }
 
     public static func productionIfKeyExists(source: String) throws -> InputOutputLoggingRecorder? {
+        try productionIfKeyExists(source: source, preferencesStore: InputOutputLoggingPreferencesStore())
+    }
+
+    public static func productionIfKeyExists(
+        source: String,
+        preferencesStore: InputOutputLoggingPreferencesStore
+    ) throws -> InputOutputLoggingRecorder? {
         guard let key = try InputOutputLogKeyProvider.loadExisting() else {
             return nil
         }
 
+        let preferences = (try? preferencesStore.load()) ?? InputOutputLoggingPreferences()
         return InputOutputLoggingRecorder(
             source: source,
-            logStore: InputOutputLogStore(encryptionKey: key)
+            preferencesStore: preferencesStore,
+            logStore: InputOutputLogStore(
+                url: InputOutputLogStore.resolvedURL(preferences: preferences),
+                encryptionKey: key
+            )
         )
     }
 
@@ -517,7 +590,10 @@ public struct InputOutputLoggingRecorder: Sendable {
             source: source,
             sessionID: sessionID,
             preferencesStore: preferencesStore,
-            logStore: InputOutputLogStore(encryptionKey: InputOutputLogKeyProvider.loadOrCreate())
+            logStore: InputOutputLogStore(
+                url: InputOutputLogStore.resolvedURL(preferences: preferences),
+                encryptionKey: InputOutputLogKeyProvider.loadOrCreate()
+            )
         )
     }
 

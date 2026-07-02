@@ -182,7 +182,7 @@ run_test "--help shows expected subcommands"
 
 HELP_OUTPUT="$("$BINARY" --help 2>&1)"
 
-for subcmd in start stop status models logs config agent auth setup launch update serve; do
+for subcmd in start stop status models logs config agent auth setup launch update serve sessions; do
     if echo "$HELP_OUTPUT" | grep -q "$subcmd"; then
         pass "--help lists subcommand: $subcmd"
     else
@@ -218,6 +218,50 @@ if [[ "$AGENT_STATUS_CHECK" == "PASS" ]]; then
     pass "agent status returns structured JSON: $AGENT_STATUS_JSON"
 else
     fail "agent status returns structured JSON" "$AGENT_STATUS_CHECK / $AGENT_STATUS_JSON"
+fi
+
+run_test "sessions list emits structured JSON"
+
+SESSIONS_LIST_JSON="$("$BINARY" sessions list --json 2>&1)"
+SESSIONS_LIST_CHECK="$(python3 - "$SESSIONS_LIST_JSON" <<'PY'
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    assert d.get("schema_version") == 1
+    assert d.get("command") == "sessions list"
+    assert d.get("ok") is True
+    sessions = d.get("data", {}).get("sessions")
+    assert isinstance(sessions, list)
+    print("PASS")
+except Exception as e:
+    print("PARSE_ERROR: " + str(e))
+PY
+)"
+if [[ "$SESSIONS_LIST_CHECK" == "PASS" ]]; then
+    pass "sessions list returns structured JSON: $SESSIONS_LIST_JSON"
+else
+    fail "sessions list returns structured JSON" "$SESSIONS_LIST_CHECK / $SESSIONS_LIST_JSON"
+fi
+
+run_test "sessions show reports a structured error for an unknown session id"
+
+SESSIONS_SHOW_JSON="$("$BINARY" sessions show smoke-test-nonexistent-session-id --json 2>&1 || true)"
+SESSIONS_SHOW_CHECK="$(python3 - "$SESSIONS_SHOW_JSON" <<'PY'
+import sys, json
+try:
+    d = json.loads(sys.argv[1])
+    assert d.get("ok") is False
+    assert d.get("command") == "sessions show"
+    assert d.get("error", {}).get("code") == "E060"
+    print("PASS")
+except Exception as e:
+    print("PARSE_ERROR: " + str(e))
+PY
+)"
+if [[ "$SESSIONS_SHOW_CHECK" == "PASS" ]]; then
+    pass "sessions show reports structured error for unknown id: $SESSIONS_SHOW_JSON"
+else
+    fail "sessions show reports structured error for unknown id" "$SESSIONS_SHOW_CHECK / $SESSIONS_SHOW_JSON"
 fi
 
 run_test "start and serve help document prompt caching mode"
@@ -1155,7 +1199,7 @@ fi
 # ===========================================================================
 run_test "MCP registers agent-first recovery tools"
 
-for tool in preflight auth_status auth_set verify_routing; do
+for tool in preflight auth_status auth_set verify_routing get_session_history; do
     if grep -q "name: \"$tool\"" "$PROJECT_DIR/Sources/MCP/MCPServerSetup.swift"; then
         pass "MCP registers tool: $tool"
     else

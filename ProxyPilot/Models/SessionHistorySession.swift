@@ -337,6 +337,71 @@ extension InputOutputLogContent {
     }
 }
 
+struct SessionHistorySessionExport: Codable {
+    let sessionID: String
+    let source: String
+    let startedAt: Date?
+    let endedAt: Date?
+    let requestCount: Int
+    let totalPromptTokens: Int
+    let totalCompletionTokens: Int
+    let totalTokens: Int
+    let requests: [ProxyPilotCore.RequestRecord]
+
+    init(session: SessionHistorySession) {
+        sessionID = session.id
+        source = session.source
+        startedAt = session.startedAt
+        endedAt = session.endedAt
+        requestCount = session.requestCount
+        totalPromptTokens = session.totalPromptTokens
+        totalCompletionTokens = session.totalCompletionTokens
+        totalTokens = session.totalTokens
+        requests = session.requests
+    }
+}
+
+enum SessionHistoryFileExport {
+    static func json(for session: SessionHistorySession) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return String(decoding: try encoder.encode(SessionHistorySessionExport(session: session)), as: UTF8.self)
+    }
+
+    static let csvHeader = "sessionID,source,timestamp,model,promptTokens,completionTokens,promptCacheHitTokens,promptCacheMissTokens,promptCacheWriteTokens,durationSeconds,path,wasStreaming"
+
+    static func csv(for session: SessionHistorySession) -> String {
+        let formatter = ISO8601DateFormatter()
+        var lines = [csvHeader]
+        for request in session.requests {
+            let fields = [
+                session.id,
+                session.source,
+                formatter.string(from: request.timestamp),
+                request.model,
+                String(request.promptTokens),
+                String(request.completionTokens),
+                request.promptCacheHitTokens.map(String.init) ?? "",
+                request.promptCacheMissTokens.map(String.init) ?? "",
+                request.promptCacheWriteTokens.map(String.init) ?? "",
+                String(request.durationSeconds),
+                request.path,
+                String(request.wasStreaming)
+            ]
+            lines.append(fields.map(csvEscapedField).joined(separator: ","))
+        }
+        return lines.joined(separator: "\r\n")
+    }
+
+    private static func csvEscapedField(_ field: String) -> String {
+        guard field.contains(",") || field.contains("\"") || field.contains("\n") else {
+            return field
+        }
+        return "\"" + field.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+}
+
 enum SessionHistoryLogExport {
     static func json(for record: InputOutputLogRecord) throws -> String {
         let encoder = JSONEncoder()

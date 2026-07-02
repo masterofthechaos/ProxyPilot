@@ -66,6 +66,7 @@ final class AppViewModel: ObservableObject {
     private static let inputOutputLoggingCLIEnabledDefaultsKey = "proxypilot.inputOutputLogging.cliEnabled"
     private static let inputOutputLoggingRetentionDefaultsKey = "proxypilot.inputOutputLogging.retention"
     private static let inputOutputLoggingExternalStorageDefaultsKey = "proxypilot.inputOutputLogging.externalStorage"
+    private static let inputOutputLoggingExternalStoragePathDefaultsKey = "proxypilot.inputOutputLogging.externalStoragePath"
     private static let promptCachingModeDefaultsKey = "proxypilot.promptCaching.mode"
     static let appearancePreferenceDefaultsKey = "proxypilot.customization.appearance"
     static let proxyPilotAccentHexDefaultsKey = "proxypilot.customization.accentHex"
@@ -303,7 +304,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func addCustomProvider(name: String, apiBaseURL: String, apiKey: String) {
-        let provider = CustomProvider(name: name, apiBaseURL: apiBaseURL)
+        let normalizedURL = proxyService.normalizedUpstreamAPIBase(from: apiBaseURL)?.absoluteString ?? apiBaseURL
+        let provider = CustomProvider(name: name, apiBaseURL: normalizedURL)
         customProviderStorage.add(provider, apiKey: apiKey)
         objectWillChange.send()
     }
@@ -373,6 +375,12 @@ final class AppViewModel: ObservableObject {
     @Published var isCopilotSidecarLogVisible: Bool = false
     @Published var copilotSidecarLogText: String = ""
     @Published var copilotSidecarLogStatusText: String = ""
+    @Published var copilotSidecarInstalledVersion: String = ""
+    @Published var copilotSidecarLatestVersion: String = ""
+    @Published var copilotSidecarUpdateAvailable: Bool = false
+    @Published var isCheckingCopilotSidecarUpdate: Bool = false
+    @Published var isUpdatingCopilotSidecar: Bool = false
+    @Published var copilotSidecarUpdateStatusText: String = ""
 
     @Published var launchAtLogin: Bool = false
     @Published private(set) var sessionHistorySessions: [SessionHistorySession] = []
@@ -809,6 +817,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.inputOutputLoggingCLIEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.inputOutputLoggingRetentionDefaultsKey)
         defaults.removeObject(forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
+        defaults.removeObject(forKey: Self.inputOutputLoggingExternalStoragePathDefaultsKey)
         defaults.removeObject(forKey: Self.promptCachingModeDefaultsKey)
         defaults.removeObject(forKey: Self.appearancePreferenceDefaultsKey)
         defaults.removeObject(forKey: Self.proxyPilotAccentHexDefaultsKey)
@@ -881,6 +890,12 @@ final class AppViewModel: ObservableObject {
         isCopilotSidecarLogVisible = false
         copilotSidecarLogText = ""
         copilotSidecarLogStatusText = ""
+        copilotSidecarInstalledVersion = ""
+        copilotSidecarLatestVersion = ""
+        copilotSidecarUpdateAvailable = false
+        isCheckingCopilotSidecarUpdate = false
+        isUpdatingCopilotSidecar = false
+        copilotSidecarUpdateStatusText = ""
 
         launchAtLogin = false
         anthropicTranslatorFallbackEnabled = false
@@ -897,6 +912,7 @@ final class AppViewModel: ObservableObject {
         inputOutputLoggingCLIEnabled = false
         inputOutputLoggingRetention = .twentyFourHoursDefault
         inputOutputLoggingExternalStorageEnabled = false
+        inputOutputLoggingExternalStoragePath = nil
         promptCachingMode = .computeCacheHints
         appearancePreference = .system
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
@@ -1065,6 +1081,41 @@ final class AppViewModel: ObservableObject {
         isCopilotSidecarLogVisible = true
     }
 
+    func checkCopilotSidecarUpdate() async {
+        isCheckingCopilotSidecarUpdate = true
+        defer { isCheckingCopilotSidecarUpdate = false }
+
+        let status = await copilotSidecarService.checkForUpdate()
+        copilotSidecarInstalledVersion = status.installedVersion ?? ""
+        copilotSidecarLatestVersion = status.latestVersion ?? ""
+        copilotSidecarUpdateAvailable = status.updateAvailable
+
+        if status.installedVersion == nil {
+            copilotSidecarUpdateStatusText = "Install xcode-copilot-server to check its version."
+        } else if status.latestVersion == nil {
+            copilotSidecarUpdateStatusText = "Could not reach the npm registry to check for updates."
+        } else if status.updateAvailable {
+            copilotSidecarUpdateStatusText = "Update available: \(status.installedVersion ?? "?") → \(status.latestVersion ?? "?")."
+        } else {
+            copilotSidecarUpdateStatusText = "xcode-copilot-server is up to date (\(status.installedVersion ?? "?"))."
+        }
+    }
+
+    func updateCopilotSidecar() async {
+        isUpdatingCopilotSidecar = true
+        copilotSidecarUpdateStatusText = "Updating xcode-copilot-server..."
+        defer { isUpdatingCopilotSidecar = false }
+
+        do {
+            try await copilotSidecarService.updateToLatest()
+            await checkCopilotSidecarUpdate()
+            await refreshCopilotSidecarStatus()
+            copilotSidecarUpdateStatusText = "Updated to \(copilotSidecarInstalledVersion). Restart the helper to use it."
+        } catch {
+            copilotSidecarUpdateStatusText = "Update failed: \(error.localizedDescription) Try `npm install -g xcode-copilot-server@latest` manually in Terminal."
+        }
+    }
+
     func openCopilotLoginTerminal() async {
         guard !copilotSidecarLoginCommand.isEmpty else { return }
         await copilotSidecarService.openLoginTerminal(command: copilotSidecarLoginCommand)
@@ -1139,7 +1190,7 @@ final class AppViewModel: ObservableObject {
                     operation: .modelFetch
                 )
                 copilotToolCallTestSucceeded = false
-                copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
+                copilotToolCallTestOutput = copilotToolCallFailureMessage(issue.message)
                 applyIssue(issue)
                 return
             }
@@ -1180,9 +1231,17 @@ final class AppViewModel: ObservableObject {
             )
             copilotToolCallTestModelUsed = model
             copilotToolCallTestSucceeded = false
-            copilotToolCallTestOutput = "Tool-call test failed: \(issue.message)"
+            copilotToolCallTestOutput = copilotToolCallFailureMessage(issue.message)
             applyIssue(issue)
         }
+    }
+
+    private func copilotToolCallFailureMessage(_ baseMessage: String) -> String {
+        var message = "Tool-call test failed: \(baseMessage)"
+        if upstreamProvider == .githubCopilot, let detail = copilotSidecarService.recentFailureDetail() {
+            message += "\n\nSidecar log: \(detail)"
+        }
+        return message
     }
 
     @Published var useBuiltInProxy: Bool = true {
@@ -1280,6 +1339,25 @@ final class AppViewModel: ObservableObject {
             defaults.set(inputOutputLoggingExternalStorageEnabled, forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
             persistSharedInputOutputLoggingPreferences()
         }
+    }
+
+    @Published var inputOutputLoggingExternalStoragePath: String? {
+        didSet {
+            defaults.set(inputOutputLoggingExternalStoragePath, forKey: Self.inputOutputLoggingExternalStoragePathDefaultsKey)
+            persistSharedInputOutputLoggingPreferences()
+        }
+    }
+
+    /// `false` when a configured external storage location is currently unreachable
+    /// (unmounted volume, revoked permission) and new records will fall back to
+    /// Application Support. Re-evaluated on read, not cached.
+    var isInputOutputLoggingExternalStorageReachable: Bool {
+        ProxyPilotCore.InputOutputLogStore.isExternalStorageOverrideReachable(
+            preferences: ProxyPilotCore.InputOutputLoggingPreferences(
+                externalStorageEnabled: inputOutputLoggingExternalStorageEnabled,
+                externalStoragePath: inputOutputLoggingExternalStoragePath
+            )
+        )
     }
 
     @Published var promptCachingMode: PromptCachingMode = .computeCacheHints {
@@ -1395,6 +1473,29 @@ final class AppViewModel: ObservableObject {
         inputOutputLoggingExternalStorageEnabled = false
     }
 
+    /// Enables/disables the external save location override. Enabling without a
+    /// previously chosen folder is a no-op; use `chooseInputOutputLoggingExternalStorageFolder()`
+    /// to set the path first.
+    func setInputOutputLoggingExternalStorageEnabled(_ enabled: Bool) {
+        guard !enabled || inputOutputLoggingExternalStoragePath != nil else { return }
+        inputOutputLoggingExternalStorageEnabled = enabled
+    }
+
+    /// Presents an NSOpenPanel for the user to choose a folder, stores it, and
+    /// enables the override.
+    func chooseInputOutputLoggingExternalStorageFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Input & Output Log Storage Location"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        inputOutputLoggingExternalStoragePath = url.path
+        inputOutputLoggingExternalStorageEnabled = true
+    }
+
     func setInputOutputRecordInputs(_ enabled: Bool) {
         inputOutputLoggingRecordInputs = enabled
         reconcileInputOutputLoggingSelection()
@@ -1451,8 +1552,6 @@ final class AppViewModel: ObservableObject {
     }
 
     private func reconcileStoredInputOutputLoggingState() {
-        inputOutputLoggingExternalStorageEnabled = false
-
         if inputOutputLoggingEnabled && !inputOutputLoggingRecordInputs && !inputOutputLoggingRecordOutputs {
             inputOutputLoggingRecordInputs = true
             inputOutputLoggingRecordOutputs = true
@@ -1462,6 +1561,7 @@ final class AppViewModel: ObservableObject {
             inputOutputLoggingRecordInputs = false
             inputOutputLoggingRecordOutputs = false
             inputOutputLoggingCLIEnabled = false
+            inputOutputLoggingExternalStorageEnabled = false
         }
     }
 
@@ -1476,7 +1576,8 @@ final class AppViewModel: ObservableObject {
             recordOutputs: inputOutputLoggingRecordOutputs,
             cliEnabled: inputOutputLoggingCLIEnabled,
             retention: coreRetention,
-            externalStorageEnabled: inputOutputLoggingExternalStorageEnabled
+            externalStorageEnabled: inputOutputLoggingExternalStorageEnabled,
+            externalStoragePath: inputOutputLoggingExternalStoragePath
         )
 
         try? inputOutputLoggingPreferencesStore.save(preferences)
@@ -2384,6 +2485,9 @@ final class AppViewModel: ObservableObject {
         activeCustomUpstreamModels = models
         cacheCustomUpstreamModels(models, providerID: providerID)
         activeCustomSelectedUpstreamModels.formUnion(customSavedDefaultModelSet)
+        if let apiBase = activeCustomProvider?.apiBaseURL, isLocalhostURL(apiBase) {
+            activeCustomSelectedUpstreamModels.formUnion(models.map(\.id))
+        }
         reconcileCustomXcodeAgentModelSelection()
     }
 
@@ -2470,6 +2574,7 @@ final class AppViewModel: ObservableObject {
             rawValue: defaults.string(forKey: Self.inputOutputLoggingRetentionDefaultsKey) ?? ""
         ) ?? .twentyFourHoursDefault
         inputOutputLoggingExternalStorageEnabled = defaults.bool(forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
+        inputOutputLoggingExternalStoragePath = defaults.string(forKey: Self.inputOutputLoggingExternalStoragePathDefaultsKey)
         promptCachingMode = PromptCachingMode(
             rawValue: defaults.string(forKey: Self.promptCachingModeDefaultsKey) ?? ""
         ) ?? .computeCacheHints

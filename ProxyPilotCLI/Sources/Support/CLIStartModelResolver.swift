@@ -53,11 +53,12 @@ enum CLIStartModelResolver {
             return CLIStartModelResolution(models: fallback, wasDiscoveredFromUpstream: false)
         }
 
-        guard provider.isLocal else {
+        let baseURL = normalizedBaseURL(upstreamURL, provider: provider)
+
+        guard provider.isLocal || isSafeLocalDiscoveryURL(baseURL) else {
             return CLIStartModelResolution(models: [], wasDiscoveredFromUpstream: false)
         }
 
-        let baseURL = normalizedBaseURL(upstreamURL, provider: provider)
         guard isSafeLocalDiscoveryURL(baseURL) else {
             throw ResolutionError.unsafeLocalDiscoveryURL(provider: provider, baseURL: baseURL)
         }

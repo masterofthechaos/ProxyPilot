@@ -26,15 +26,23 @@ public enum ModelDiscovery {
     }
 
     /// Fetch model IDs from an upstream provider using provider-specific auth and route rules.
+    /// Strips trailing slashes and known endpoint suffixes so that appending
+    /// `provider.modelsPath` never produces a double-path like `/v1/models/models`.
+    static func normalizeDiscoveryBaseURL(_ baseURL: String) -> String {
+        var normalized = baseURL
+        while normalized.hasSuffix("/") { normalized.removeLast() }
+        if normalized.hasSuffix("/models") {
+            normalized = String(normalized.dropLast("/models".count))
+        }
+        return normalized
+    }
+
     public static func fetchModels(
         provider: UpstreamProvider,
         baseURL: String,
         apiKey: String?
     ) async throws -> [String] {
-        var normalizedBaseURL = baseURL
-        while normalizedBaseURL.hasSuffix("/") {
-            normalizedBaseURL.removeLast()
-        }
+        let normalizedBaseURL = normalizeDiscoveryBaseURL(baseURL)
         let urlString = normalizedBaseURL + provider.modelsPath
         guard let components = URLComponents(string: urlString) else { throw Error.invalidJSON }
 

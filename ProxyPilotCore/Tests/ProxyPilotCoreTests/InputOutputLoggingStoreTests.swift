@@ -12,6 +12,77 @@ final class InputOutputLoggingStoreTests: XCTestCase {
         XCTAssertEqual(InputOutputLogKeyProvider.keychainServiceName(environment: [:]), "proxypilot")
     }
 
+    func testExtendedRetentionCasesReturnCorrectDurations() {
+        XCTAssertEqual(InputOutputLoggingRetention.sevenDays.durationSeconds, 7 * 24 * 60 * 60)
+        XCTAssertEqual(InputOutputLoggingRetention.thirtyDays.durationSeconds, 30 * 24 * 60 * 60)
+    }
+
+    func testExpirationDateIsNoLongerCappedAtTwentyFourHours() {
+        let timestamp = Date(timeIntervalSince1970: 1_714_000_000)
+
+        XCTAssertEqual(
+            InputOutputLoggingRetention.sevenDays.expirationDate(from: timestamp),
+            timestamp.addingTimeInterval(7 * 24 * 60 * 60)
+        )
+        XCTAssertEqual(
+            InputOutputLoggingRetention.thirtyDays.expirationDate(from: timestamp),
+            timestamp.addingTimeInterval(30 * 24 * 60 * 60)
+        )
+        // Existing short-window cases must be unaffected by removing the old 24h cap.
+        XCTAssertEqual(
+            InputOutputLoggingRetention.oneHour.expirationDate(from: timestamp),
+            timestamp.addingTimeInterval(60 * 60)
+        )
+        XCTAssertEqual(
+            InputOutputLoggingRetention.twentyFourHoursDefault.expirationDate(from: timestamp),
+            timestamp.addingTimeInterval(24 * 60 * 60)
+        )
+        XCTAssertNil(InputOutputLoggingRetention.untilQuit.expirationDate(from: timestamp))
+    }
+
+    func testPruneExpiredHandlesThirtyDayRetentionWindowRecords() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let logURL = directory.appendingPathComponent("records.jsonl.enc")
+        let store = InputOutputLogStore(
+            url: logURL,
+            encryptionKey: Data(repeating: 3, count: 32)
+        )
+
+        let now = Date(timeIntervalSince1970: 1_714_000_000)
+        let withinWindow = InputOutputLogRecord(
+            timestamp: now,
+            source: "cli",
+            path: "/v1/messages",
+            model: "glm-5",
+            provider: "zai",
+            wasStreaming: false,
+            statusCode: 200,
+            retentionExpiresAt: InputOutputLoggingRetention.thirtyDays.expirationDate(from: now),
+            input: nil,
+            output: nil
+        )
+        let expired = InputOutputLogRecord(
+            timestamp: now.addingTimeInterval(-31 * 24 * 60 * 60),
+            source: "cli",
+            path: "/v1/messages",
+            model: "glm-5",
+            provider: "zai",
+            wasStreaming: false,
+            statusCode: 200,
+            retentionExpiresAt: now.addingTimeInterval(-24 * 60 * 60),
+            input: nil,
+            output: nil
+        )
+
+        try await store.append(expired)
+        try await store.append(withinWindow)
+        try await store.pruneExpired(now: now)
+
+        let remaining = try await store.readRecords()
+        XCTAssertEqual(remaining.map(\.id), [withinWindow.id])
+    }
+
     func testOutputTruncatedFlagRoundTripsThroughEncryptedStore() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -150,6 +221,66 @@ final class InputOutputLoggingStoreTests: XCTestCase {
         )
         XCTAssertNil(record.outputTruncated)
         XCTAssertEqual(record.source, "cli")
+    }
+
+    func testResolvedURLPrefersValidExternalStorageOverride() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let preferences = InputOutputLoggingPreferences(
+            externalStorageEnabled: true,
+            externalStoragePath: directory.path
+        )
+
+        XCTAssertEqual(
+            InputOutputLogStore.resolvedURL(preferences: preferences),
+            directory.appendingPathComponent("records.jsonl.enc")
+        )
+        XCTAssertTrue(InputOutputLogStore.isExternalStorageOverrideReachable(preferences: preferences))
+    }
+
+    func testResolvedURLFallsBackToDefaultWhenOverrideDirectoryIsMissing() throws {
+        let missingDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+
+        let preferences = InputOutputLoggingPreferences(
+            externalStorageEnabled: true,
+            externalStoragePath: missingDirectory.path
+        )
+
+        XCTAssertEqual(InputOutputLogStore.resolvedURL(preferences: preferences), InputOutputLogStore.defaultURL)
+        XCTAssertFalse(InputOutputLogStore.isExternalStorageOverrideReachable(preferences: preferences))
+    }
+
+    func testResolvedURLUsesDefaultWhenExternalStorageDisabled() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let preferences = InputOutputLoggingPreferences(
+            externalStorageEnabled: false,
+            externalStoragePath: directory.path
+        )
+
+        XCTAssertEqual(InputOutputLogStore.resolvedURL(preferences: preferences), InputOutputLogStore.defaultURL)
+        XCTAssertTrue(InputOutputLogStore.isExternalStorageOverrideReachable(preferences: preferences))
+    }
+
+    func testPreferencesDecodeWithoutExternalStoragePathDefaultsToNil() throws {
+        let json = """
+        {
+            "enabled": true,
+            "recordInputs": true,
+            "recordOutputs": false,
+            "cliEnabled": false,
+            "retention": "twentyFourHoursDefault",
+            "externalStorageEnabled": false
+        }
+        """
+        let decoded = try JSONDecoder().decode(InputOutputLoggingPreferences.self, from: Data(json.utf8))
+        XCTAssertNil(decoded.externalStoragePath)
+        XCTAssertTrue(decoded.enabled)
     }
 
     func testPreferencesPersistToSharedJSONFile() throws {

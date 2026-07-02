@@ -420,6 +420,9 @@ final class ProviderManager: ObservableObject {
             defaults.set(savedDefaultModels, forKey: Self.defaultModelsKey(for: upstreamProvider))
         }
         selectedUpstreamModels.formUnion(savedDefaultModelSet)
+        if upstreamProvider.isLocal {
+            selectedUpstreamModels.formUnion(models.map(\.id))
+        }
         reconcileXcodeAgentModelSelection()
     }
 

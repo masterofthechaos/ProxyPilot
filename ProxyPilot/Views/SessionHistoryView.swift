@@ -1,6 +1,7 @@
 import AppKit
 import ProxyPilotCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SessionHistoryView: View {
     private enum ViewMode: String, CaseIterable, Identifiable {
@@ -35,6 +36,7 @@ struct SessionHistoryView: View {
     @State private var selectedSessionLogLoadTask: Task<Void, Never>?
     @State private var selectedSessionLogLoadError: String?
     @State private var isLoadingSelectedSessionLogs = false
+    @State private var fileExportStatus: String?
 
     private var selectedSession: SessionHistorySession? {
         if let selectedSessionID,
@@ -273,6 +275,12 @@ struct SessionHistoryView: View {
     private func sessionDetailStack(_ session: SessionHistorySession) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             sessionHeader(session)
+            if let fileExportStatus {
+                Text(fileExportStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
             metricGrid(session)
             modelDistribution(session)
             requestTimeline(session)
@@ -489,6 +497,14 @@ struct SessionHistoryView: View {
                     Button(SessionHistorySensitiveCopy.markdownMenuTitle) {
                         copySessionLogsMarkdown(logs)
                     }
+                }
+            }
+            Section("Export to file") {
+                Button("Session as CSV...") {
+                    exportSessionCSV(session)
+                }
+                Button("Session as JSON...") {
+                    exportSessionJSONToFile(session)
                 }
             }
         }
@@ -1191,25 +1207,59 @@ struct SessionHistoryView: View {
     }
 
     private func copySessionJSON(_ session: SessionHistorySession) {
-        let export = SessionHistoryExport(
-            sessionID: session.id,
-            source: session.source,
-            startedAt: session.startedAt,
-            endedAt: session.endedAt,
-            requestCount: session.requestCount,
-            totalPromptTokens: session.totalPromptTokens,
-            totalCompletionTokens: session.totalCompletionTokens,
-            totalTokens: session.totalTokens,
-            requests: session.requests
-        )
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(export),
-              let json = String(data: data, encoding: .utf8) else { return }
+        guard let json = try? SessionHistoryFileExport.json(for: session) else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(json, forType: .string)
         copiedSessionFormat = "json"
+    }
+
+    private func exportSessionJSONToFile(_ session: SessionHistorySession) {
+        guard let json = try? SessionHistoryFileExport.json(for: session) else {
+            fileExportStatus = "JSON export failed: could not encode session."
+            return
+        }
+        writeSessionExport(
+            session: session,
+            content: json,
+            fileExtension: "json",
+            contentType: .json
+        )
+    }
+
+    private func exportSessionCSV(_ session: SessionHistorySession) {
+        writeSessionExport(
+            session: session,
+            content: SessionHistoryFileExport.csv(for: session),
+            fileExtension: "csv",
+            contentType: UTType(filenameExtension: "csv") ?? .commaSeparatedText
+        )
+    }
+
+    private func writeSessionExport(
+        session: SessionHistorySession,
+        content: String,
+        fileExtension: String,
+        contentType: UTType
+    ) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let suggestedName = "proxypilot-session-\(formatter.string(from: Date())).\(fileExtension)"
+
+        let panel = NSSavePanel()
+        panel.title = "Export Session as \(fileExtension.uppercased())"
+        panel.nameFieldStringValue = suggestedName
+        panel.allowedContentTypes = [contentType]
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            try content.write(to: url, atomically: true, encoding: .utf8)
+            fileExportStatus = "Exported session to \(url.path)"
+        } catch {
+            fileExportStatus = "Export failed: \(error.localizedDescription)"
+        }
     }
 
     private func copySessionMarkdown(_ session: SessionHistorySession) {
@@ -1301,6 +1351,10 @@ struct SessionHistoryView: View {
             return "12 hours"
         case .twentyFourHoursDefault, .twentyFourHoursMaximum:
             return "24 hours"
+        case .sevenDays:
+            return "7 days"
+        case .thirtyDays:
+            return "30 days"
         }
     }
 
@@ -1357,16 +1411,4 @@ struct SessionHistoryView: View {
             await refreshSelectedLogViewModels(for: session)
         }
     }
-}
-
-private struct SessionHistoryExport: Encodable {
-    let sessionID: String
-    let source: String
-    let startedAt: Date?
-    let endedAt: Date?
-    let requestCount: Int
-    let totalPromptTokens: Int
-    let totalCompletionTokens: Int
-    let totalTokens: Int
-    let requests: [ProxyPilotCore.RequestRecord]
 }

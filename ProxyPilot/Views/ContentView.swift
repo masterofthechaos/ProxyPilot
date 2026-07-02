@@ -1470,7 +1470,7 @@ struct ContentView: View {
         }
 
         HStack(spacing: 12) {
-            if !vm.isCopilotSidecarGitHubAuthenticated {
+            if !vm.isCopilotSidecarGitHubAuthenticated || !vm.copilotSidecarLoginCommand.isEmpty {
                 Button(copilotSidecarLoginActionTitle) {
                     performCopilotSidecarLoginAction()
                 }
@@ -1502,6 +1502,10 @@ struct ContentView: View {
             }
 
             Spacer()
+        }
+
+        if !vm.copilotSidecarExecutablePath.isEmpty {
+            copilotSidecarVersionRow
         }
 
         if copilotInstallCommandCopied && vm.copilotSidecarExecutablePath.isEmpty {
@@ -1585,6 +1589,46 @@ struct ContentView: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    @ViewBuilder
+    private var copilotSidecarVersionRow: some View {
+        HStack(spacing: 8) {
+            Text(copilotSidecarVersionLabel)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+
+            Button(vm.isCheckingCopilotSidecarUpdate ? "Checking..." : "Check for Updates") {
+                Task { await vm.checkCopilotSidecarUpdate() }
+            }
+            .font(.caption2)
+            .disabled(vm.isCheckingCopilotSidecarUpdate || vm.isUpdatingCopilotSidecar)
+
+            if vm.copilotSidecarUpdateAvailable {
+                Button(vm.isUpdatingCopilotSidecar ? "Updating..." : "Update Now") {
+                    Task { await vm.updateCopilotSidecar() }
+                }
+                .font(.caption2)
+                .disabled(vm.isUpdatingCopilotSidecar)
+            }
+
+            Spacer()
+        }
+        .padding(.top, 2)
+
+        if !vm.copilotSidecarUpdateStatusText.isEmpty {
+            Text(vm.copilotSidecarUpdateStatusText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var copilotSidecarVersionLabel: String {
+        vm.copilotSidecarInstalledVersion.isEmpty
+            ? "xcode-copilot-server version: unknown"
+            : "xcode-copilot-server version: \(vm.copilotSidecarInstalledVersion)"
     }
 
     @ViewBuilder

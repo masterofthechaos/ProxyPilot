@@ -56,4 +56,13 @@ final class ModelDiscoveryTests: XCTestCase {
         let summaries = ModelSummaryBuilder.summaries(ids: ["gpt-3.5-turbo-instruct"], verified: VerifiedModels(entries: []))
         XCTAssertEqual(summaries.first?.recommendedForXcodeAgent, false)
     }
+
+    func testNormalizeDiscoveryBaseURLStripsModelsPathSuffix() {
+        // Prevents /v1/models + /models → /v1/models/models double-pathing.
+        XCTAssertEqual(ModelDiscovery.normalizeDiscoveryBaseURL("http://127.0.0.1:11434/v1/models"), "http://127.0.0.1:11434/v1")
+        XCTAssertEqual(ModelDiscovery.normalizeDiscoveryBaseURL("http://127.0.0.1:11434/models"), "http://127.0.0.1:11434")
+        XCTAssertEqual(ModelDiscovery.normalizeDiscoveryBaseURL("http://127.0.0.1:11434/v1"), "http://127.0.0.1:11434/v1")
+        XCTAssertEqual(ModelDiscovery.normalizeDiscoveryBaseURL("http://127.0.0.1:11434/v1/"), "http://127.0.0.1:11434/v1")
+        XCTAssertEqual(ModelDiscovery.normalizeDiscoveryBaseURL("https://api.openai.com/v1"), "https://api.openai.com/v1")
+    }
 }

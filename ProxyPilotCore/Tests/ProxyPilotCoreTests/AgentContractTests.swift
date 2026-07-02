@@ -108,4 +108,55 @@ final class AgentContractTests: XCTestCase {
         XCTAssertTrue(json.contains("\"models_count\":3"))
         XCTAssertTrue(json.contains("\"upstream_probe_performed\":false"))
     }
+
+    func testSessionSummaryPayloadGroupsEventsBySessionIDNewestFirst() throws {
+        func record(_ timestamp: TimeInterval, prompt: Int, completion: Int) -> RequestRecord {
+            RequestRecord(
+                timestamp: Date(timeIntervalSince1970: timestamp),
+                model: "glm-5",
+                promptTokens: prompt,
+                completionTokens: completion,
+                durationSeconds: 1,
+                path: "/v1/messages",
+                wasStreaming: false
+            )
+        }
+
+        let events = [
+            SessionReportEvent(source: "cli", sessionID: "session-a", record: record(100, prompt: 10, completion: 5)),
+            SessionReportEvent(source: "cli", sessionID: "session-a", record: record(200, prompt: 20, completion: 8)),
+            SessionReportEvent(source: "gui", sessionID: "session-b", record: record(300, prompt: 30, completion: 12)),
+        ]
+
+        let summaries = SessionSummaryPayload.build(from: events)
+
+        XCTAssertEqual(summaries.map(\.id), ["session-b", "session-a"], "Newest session (by endedAt) should sort first")
+
+        let sessionA = try XCTUnwrap(summaries.first { $0.id == "session-a" })
+        XCTAssertEqual(sessionA.source, "cli")
+        XCTAssertEqual(sessionA.requestCount, 2)
+        XCTAssertEqual(sessionA.totalPromptTokens, 30)
+        XCTAssertEqual(sessionA.totalCompletionTokens, 13)
+        XCTAssertEqual(sessionA.totalTokens, 43)
+        XCTAssertEqual(sessionA.startedAt, Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(sessionA.endedAt, Date(timeIntervalSince1970: 200))
+    }
+
+    func testSessionsListPayloadEncodesSnakeCaseKeys() throws {
+        let summary = SessionSummaryPayload(
+            id: "session-a",
+            source: "cli",
+            requestCount: 2,
+            totalPromptTokens: 30,
+            totalCompletionTokens: 13,
+            totalTokens: 43,
+            startedAt: Date(timeIntervalSince1970: 100),
+            endedAt: Date(timeIntervalSince1970: 200)
+        )
+        let json = try AgentJSON.encode(AgentEnvelope(command: "sessions list", data: SessionsListPayload(sessions: [summary])))
+
+        XCTAssertTrue(json.contains("\"request_count\":2"))
+        XCTAssertTrue(json.contains("\"total_tokens\":43"))
+        XCTAssertTrue(json.contains("\"started_at\":\"1970-01-01T00:01:40Z\""), "Dates must encode as ISO 8601, not raw seconds-since-2001")
+    }
 }

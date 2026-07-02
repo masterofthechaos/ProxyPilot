@@ -71,6 +71,41 @@ struct CLIStartModelResolverTests {
         }
     }
 
+    @Test func customProviderWithLoopbackURLPerformsDiscovery() async throws {
+        var discoveryWasCalled = false
+
+        let resolution = try await CLIStartModelResolver.resolve(
+            rawModels: nil,
+            provider: .openAI,
+            upstreamURL: "http://127.0.0.1:11434/v1",
+            apiKey: nil,
+            discoverModels: { _, _, _ in
+                discoveryWasCalled = true
+                return ["llama3.2:1b", "qwen2.5-coder:7b"]
+            }
+        )
+
+        #expect(discoveryWasCalled, "Discovery must run for a custom provider pointing at loopback.")
+        #expect(resolution.models == ["llama3.2:1b", "qwen2.5-coder:7b"])
+        #expect(resolution.wasDiscoveredFromUpstream)
+    }
+
+    @Test func customProviderWithRemoteURLSkipsDiscovery() async throws {
+        let resolution = try await CLIStartModelResolver.resolve(
+            rawModels: nil,
+            provider: .openAI,
+            upstreamURL: "https://api.openai.com/v1",
+            apiKey: "sk-test",
+            discoverModels: { _, _, _ in
+                Issue.record("Remote custom-provider URL must not trigger discovery.")
+                return []
+            }
+        )
+
+        #expect(resolution.models.isEmpty)
+        #expect(!resolution.wasDiscoveredFromUpstream)
+    }
+
     @Test func localDiscoveryRejectsURLTricksBeforeFetch() async throws {
         let unsafeURLs = [
             "http://user:secret@127.0.0.1:11434/v1",

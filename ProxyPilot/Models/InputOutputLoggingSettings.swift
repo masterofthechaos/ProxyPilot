@@ -9,6 +9,8 @@ enum InputOutputLoggingRetention: String, CaseIterable, Identifiable {
     case sixHours
     case twelveHours
     case twentyFourHoursMaximum
+    case sevenDays
+    case thirtyDays
 
     var id: Self { self }
 
@@ -30,6 +32,10 @@ enum InputOutputLoggingRetention: String, CaseIterable, Identifiable {
             return "12 hours"
         case .twentyFourHoursMaximum:
             return "24 hours (maximum)"
+        case .sevenDays:
+            return "7 days"
+        case .thirtyDays:
+            return "30 days"
         }
     }
 
@@ -51,6 +57,10 @@ enum InputOutputLoggingRetention: String, CaseIterable, Identifiable {
             return "ProxyPilot will delete any saved inputs or outputs after 12 hours."
         case .twentyFourHoursMaximum:
             return "ProxyPilot will delete any saved inputs or outputs after 24 hours."
+        case .sevenDays:
+            return "ProxyPilot will delete any saved inputs or outputs after 7 days."
+        case .thirtyDays:
+            return "ProxyPilot will delete any saved inputs or outputs after 30 days."
         }
     }
 
@@ -70,6 +80,10 @@ enum InputOutputLoggingRetention: String, CaseIterable, Identifiable {
             return 12 * 60 * 60
         case .twentyFourHoursDefault, .twentyFourHoursMaximum:
             return 24 * 60 * 60
+        case .sevenDays:
+            return 7 * 24 * 60 * 60
+        case .thirtyDays:
+            return 30 * 24 * 60 * 60
         }
     }
 }

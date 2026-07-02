@@ -194,15 +194,24 @@ struct InputOutputLoggingSettingsView: View {
         VStack(alignment: .leading, spacing: 6) {
             Toggle("Store inputs and outputs outside of ProxyPilot", isOn: Binding(
                 get: { vm.inputOutputLoggingExternalStorageEnabled },
-                set: { _ in vm.inputOutputLoggingExternalStorageEnabled = false }
+                set: { vm.setInputOutputLoggingExternalStorageEnabled($0) }
             ))
             .toggleStyle(.switch)
-            .disabled(true)
+            .disabled(vm.inputOutputLoggingExternalStoragePath == nil)
 
-            Button("Choose save location") { }
-                .disabled(true)
+            Button(vm.inputOutputLoggingExternalStoragePath == nil ? "Choose save location..." : "Change save location...") {
+                vm.chooseInputOutputLoggingExternalStorageFolder()
+            }
 
-            helperText("Custom save locations are not available in this beta. Use manual export if you need to keep saved logs permanently.")
+            if let path = vm.inputOutputLoggingExternalStoragePath {
+                helperText("Current location: \(path)")
+            }
+
+            if vm.inputOutputLoggingExternalStorageEnabled && !vm.isInputOutputLoggingExternalStorageReachable {
+                helperText("⚠️ The chosen folder is currently unavailable. ProxyPilot is temporarily saving to its default storage location until the folder is reachable again.")
+            }
+
+            helperText("When enabled, new inputs and outputs are saved to the folder you choose instead of ProxyPilot's own storage. If that folder becomes unavailable, ProxyPilot automatically falls back to its default storage location.")
         }
     }
 

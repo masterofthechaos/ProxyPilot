@@ -218,6 +218,7 @@ final class AppViewModelTests: XCTestCase {
         vm?.setInputOutputRecordInputs(false)
         vm?.inputOutputLoggingCLIEnabled = true
         vm?.inputOutputLoggingRetention = .sixHours
+        vm?.inputOutputLoggingExternalStoragePath = "/Volumes/External/ProxyPilotLogs"
         vm?.inputOutputLoggingExternalStorageEnabled = true
         vm = nil
 
@@ -228,7 +229,41 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(relaunched.inputOutputLoggingRecordOutputs)
         XCTAssertTrue(relaunched.inputOutputLoggingCLIEnabled)
         XCTAssertEqual(relaunched.inputOutputLoggingRetention, .sixHours)
-        XCTAssertFalse(relaunched.inputOutputLoggingExternalStorageEnabled)
+        XCTAssertTrue(relaunched.inputOutputLoggingExternalStorageEnabled)
+        XCTAssertEqual(relaunched.inputOutputLoggingExternalStoragePath, "/Volumes/External/ProxyPilotLogs")
+    }
+
+    func testSetInputOutputLoggingExternalStorageEnabledRequiresPathFirst() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.confirmInputOutputLoggingEnabled()
+
+        vm.setInputOutputLoggingExternalStorageEnabled(true)
+        XCTAssertFalse(vm.inputOutputLoggingExternalStorageEnabled, "Enabling without a chosen folder should be a no-op")
+
+        vm.inputOutputLoggingExternalStoragePath = "/Volumes/External/ProxyPilotLogs"
+        vm.setInputOutputLoggingExternalStorageEnabled(true)
+        XCTAssertTrue(vm.inputOutputLoggingExternalStorageEnabled)
+
+        vm.setInputOutputLoggingExternalStorageEnabled(false)
+        XCTAssertFalse(vm.inputOutputLoggingExternalStorageEnabled)
+        XCTAssertEqual(vm.inputOutputLoggingExternalStoragePath, "/Volumes/External/ProxyPilotLogs", "Disabling should not forget the chosen folder")
+    }
+
+    func testInputOutputLoggingExternalStorageReachabilityReflectsDirectoryExistence() throws {
+        let vm = AppViewModel(defaults: defaults)
+        vm.confirmInputOutputLoggingEnabled()
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        vm.inputOutputLoggingExternalStoragePath = directory.path
+        vm.setInputOutputLoggingExternalStorageEnabled(true)
+        XCTAssertTrue(vm.isInputOutputLoggingExternalStorageReachable)
+
+        try FileManager.default.removeItem(at: directory)
+        XCTAssertFalse(vm.isInputOutputLoggingExternalStorageReachable)
     }
 
     func testInputOutputLoggingWritesSharedCorePreferencesWhenStoreProvided() throws {
@@ -1075,6 +1110,32 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(manager.isModelSelected("pinned-model"))
         XCTAssertFalse(manager.isModelSelected("optional-model"))
         XCTAssertEqual(manager.selectedUpstreamModels, ["pinned-model"])
+    }
+
+    func testLocalProviderAutoSelectsAllFetchedModelsOnFetch() {
+        let manager = makeProviderManager()
+        manager.upstreamProvider = .ollama
+
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "llama3:8b", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "qwen2.5-coder:7b", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+
+        XCTAssertTrue(manager.isModelSelected("llama3:8b"))
+        XCTAssertTrue(manager.isModelSelected("qwen2.5-coder:7b"))
+        XCTAssertEqual(manager.selectedUpstreamModels, ["llama3:8b", "qwen2.5-coder:7b"])
+    }
+
+    func testCloudProviderDoesNotAutoSelectFetchedModels() {
+        let manager = makeProviderManager()
+        // defaults to .zAI — cloud provider, requiresAPIKey=true, isLocal=false
+
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "expensive-cloud-a", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "expensive-cloud-b", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+
+        XCTAssertTrue(manager.selectedUpstreamModels.isEmpty)
     }
 
     func testSaveDefaultsPromotesSelectedVisibleModels() {
@@ -1989,6 +2050,78 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.copilotSidecarLogText.contains("Rejected request from unexpected user-agent"))
         XCTAssertTrue(vm.copilotSidecarLogStatusText.contains("Showing"))
         XCTAssertTrue(vm.copilotSidecarLogStatusText.contains("Copilot sidecar log file"))
+    }
+
+    func testCheckCopilotSidecarUpdateReportsUpdateAvailable() async {
+        let service = makeCopilotSidecarService(
+            endpointResponding: false,
+            commandRunner: { _, arguments in
+                if arguments == ["--version"] {
+                    return .init(terminationStatus: 0, stdout: "5.0.1\n", stderr: "")
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            },
+            shellRunner: { command in
+                if command.contains("npm view xcode-copilot-server version") {
+                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.checkCopilotSidecarUpdate()
+
+        XCTAssertEqual(vm.copilotSidecarInstalledVersion, "5.0.1")
+        XCTAssertEqual(vm.copilotSidecarLatestVersion, "5.0.2")
+        XCTAssertTrue(vm.copilotSidecarUpdateAvailable)
+        XCTAssertTrue(vm.copilotSidecarUpdateStatusText.contains("Update available"))
+    }
+
+    func testUpdateCopilotSidecarSucceeds() async {
+        let service = makeCopilotSidecarService(
+            endpointResponding: false,
+            commandRunner: { _, arguments in
+                if arguments == ["--version"] {
+                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
+                }
+                return .init(terminationStatus: 0, stdout: "", stderr: "")
+            },
+            shellRunner: { command in
+                if command.contains("npm install -g xcode-copilot-server@latest") {
+                    return .init(terminationStatus: 0, stdout: "", stderr: "")
+                }
+                if command.contains("npm view xcode-copilot-server version") {
+                    return .init(terminationStatus: 0, stdout: "5.0.2\n", stderr: "")
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.updateCopilotSidecar()
+
+        XCTAssertFalse(vm.isUpdatingCopilotSidecar)
+        XCTAssertTrue(vm.copilotSidecarUpdateStatusText.contains("Updated to 5.0.2"))
+    }
+
+    func testUpdateCopilotSidecarSurfacesFailure() async {
+        let service = makeCopilotSidecarService(
+            endpointResponding: false,
+            shellRunner: { command in
+                if command.contains("npm install -g xcode-copilot-server@latest") {
+                    return .init(terminationStatus: 1, stdout: "", stderr: "EACCES: permission denied")
+                }
+                return .init(terminationStatus: 1, stdout: "", stderr: "")
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, copilotSidecarService: service)
+
+        await vm.updateCopilotSidecar()
+
+        XCTAssertFalse(vm.isUpdatingCopilotSidecar)
+        XCTAssertTrue(vm.copilotSidecarUpdateStatusText.contains("Update failed"))
+        XCTAssertTrue(vm.copilotSidecarUpdateStatusText.contains("EACCES"))
     }
 
     func testCopilotSidecarInstallSwitchesProviderAndURL() async throws {
