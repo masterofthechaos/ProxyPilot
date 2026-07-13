@@ -20,6 +20,14 @@ final class SessionReportCard: ObservableObject {
 
         var totalTokens: Int { promptTokens + completionTokens }
 
+        var hasTokenTelemetry: Bool {
+            promptTokens > 0
+                || completionTokens > 0
+                || promptCacheHitTokens != nil
+                || promptCacheMissTokens != nil
+                || promptCacheWriteTokens != nil
+        }
+
         init(
             id: UUID = UUID(),
             timestamp: Date,
@@ -69,7 +77,18 @@ final class SessionReportCard: ObservableObject {
     @Published private(set) var requests: [RequestRecord] = []
     private var firstRequestTimestamp: Date?
 
-    var totalRequests: Int { requests.count }
+    /// Unbounded monotonic count of every request ever recorded this session.
+    ///
+    /// `requests` is intentionally bounded at `maxRetainedRequests` (500) to keep
+    /// the live in-memory history, latency percentiles, cost matching, and Recent
+    /// Requests list bounded (see DEVLOG v1.4.8 / v1.11.1). Deriving the *total*
+    /// request count from `requests.count` silently pinned it at 500 once a
+    /// session exceeded the retained window, so Home and the menu bar reported
+    /// "500" forever even as the session kept climbing. This counter is the
+    /// disambiguation: it counts every request, independent of the display buffer.
+    private var totalRequestCount: Int = 0
+
+    var totalRequests: Int { totalRequestCount }
 
     var totalPromptTokens: Int {
         requests.reduce(0) { $0 + $1.promptTokens }
@@ -103,6 +122,10 @@ final class SessionReportCard: ObservableObject {
         totalPromptCacheHitTokens > 0
             || totalPromptCacheMissTokens > 0
             || totalPromptCacheWriteTokens > 0
+    }
+
+    var tokenAccountingAvailable: Bool {
+        requests.contains { $0.hasTokenTelemetry }
     }
 
     var modelDistribution: [(model: String, count: Int)] {
@@ -167,6 +190,7 @@ final class SessionReportCard: ObservableObject {
         if firstRequestTimestamp == nil {
             firstRequestTimestamp = entry.timestamp
         }
+        totalRequestCount += 1
         requests.append(entry)
         let overflow = requests.count - Self.maxRetainedRequests
         if overflow > 0 {
@@ -195,6 +219,8 @@ final class SessionReportCard: ObservableObject {
             firstRequestTimestamp = entries.first?.timestamp
         }
 
+        totalRequestCount += entries.count
+
         let mapped = entries.map { entry in
             RequestRecord(
                 timestamp: entry.timestamp,
@@ -215,6 +241,7 @@ final class SessionReportCard: ObservableObject {
     func reset() {
         requests.removeAll()
         firstRequestTimestamp = nil
+        totalRequestCount = 0
     }
 
     private static func buildLatencySummary(from durations: [TimeInterval]) -> LatencySummary? {

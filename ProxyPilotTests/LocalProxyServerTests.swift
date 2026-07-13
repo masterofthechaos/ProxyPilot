@@ -164,6 +164,76 @@ private final class LocalHTTPStubServer: @unchecked Sendable {
 
 final class LocalProxyServerTests: XCTestCase {
 
+    @MainActor
+    func testLocalProxyStateTracksPendingAndFailedRequestsSeparately() {
+        let state = LocalProxyState()
+        let first = UUID()
+        let second = UUID()
+
+        state.beginRequest(id: first, modelName: "qwen/qwen3.5-9b")
+        state.beginRequest(id: second, modelName: nil)
+
+        XCTAssertEqual(state.sessionRequestCount, 2)
+        XCTAssertEqual(state.pendingRequestCount, 2)
+        XCTAssertEqual(state.failedRequestCount, 0)
+        XCTAssertEqual(state.lastModelSeen, "qwen/qwen3.5-9b")
+        XCTAssertEqual(state.activeModels, ["qwen/qwen3.5-9b"])
+
+        XCTAssertTrue(state.completeRequest(id: first))
+        XCTAssertEqual(state.pendingRequestCount, 1)
+        XCTAssertEqual(state.failedRequestCount, 0)
+        XCTAssertTrue(state.activeModels.isEmpty)
+
+        XCTAssertTrue(state.failRequest(id: second))
+        XCTAssertEqual(state.pendingRequestCount, 0)
+        XCTAssertEqual(state.failedRequestCount, 1)
+        XCTAssertNotNil(state.lastFailureAt)
+    }
+
+    @MainActor
+    func testLocalProxyStateMarksPendingRequestsFailedWhenSessionEnds() {
+        let state = LocalProxyState()
+
+        state.beginRequest(id: UUID(), modelName: "model-a")
+        state.beginRequest(id: UUID(), modelName: "model-b")
+        state.failAllPendingRequests()
+
+        XCTAssertEqual(state.sessionRequestCount, 2)
+        XCTAssertEqual(state.pendingRequestCount, 0)
+        XCTAssertEqual(state.failedRequestCount, 2)
+        XCTAssertTrue(state.activeModels.isEmpty)
+        XCTAssertNotNil(state.lastFailureAt)
+    }
+
+    @MainActor
+    func testLocalProxyStateTracksDistinctActiveModelsAcrossConcurrentRequests() {
+        let state = LocalProxyState()
+        let first = UUID()
+        let second = UUID()
+
+        state.beginRequest(id: first, modelName: "openai/gpt-5.6")
+        state.beginRequest(id: second, modelName: "anthropic/claude-opus-4.8")
+        XCTAssertEqual(state.activeModels, ["openai/gpt-5.6", "anthropic/claude-opus-4.8"])
+
+        XCTAssertTrue(state.completeRequest(id: first))
+        XCTAssertEqual(state.activeModels, ["anthropic/claude-opus-4.8"])
+
+        XCTAssertTrue(state.completeRequest(id: second))
+        XCTAssertTrue(state.activeModels.isEmpty)
+    }
+
+    @MainActor
+    func testLocalProxyStateReplacesTransportModelWithResolvedUpstreamModel() {
+        let state = LocalProxyState()
+        let requestID = UUID()
+
+        state.beginRequest(id: requestID, modelName: "claude-placeholder")
+        state.resolveRequest(id: requestID, modelName: "anthropic/claude-opus-4.8:exacto")
+
+        XCTAssertEqual(state.activeModels, ["anthropic/claude-opus-4.8:exacto"])
+        XCTAssertEqual(state.lastUpstreamModelUsed, "anthropic/claude-opus-4.8:exacto")
+    }
+
     // MARK: - Helpers
 
     private typealias H = LocalProxyServerHelpers

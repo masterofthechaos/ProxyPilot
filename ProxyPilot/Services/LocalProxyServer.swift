@@ -13,12 +13,96 @@ final class LocalProxyState: ObservableObject {
     @Published var isRunning: Bool = false
     @Published var lastStatus: String = ""
     @Published var sessionRequestCount: Int = 0
+    @Published private(set) var pendingRequestCount: Int = 0
+    @Published private(set) var failedRequestCount: Int = 0
+    @Published private(set) var activeModels: Set<String> = []
+    @Published private(set) var lastFailureAt: Date?
     @Published var lastModelSeen: String = ""
     @Published var lastUpstreamModelUsed: String = ""
     @Published var activeXcodeAgentModel: String = ""
     @Published var lastXcodeAgentRequestModel: String = ""
     @Published var lastXcodeAgentRequestStatus: Int?
     @Published var lastXcodeAgentRequestAt: Date?
+
+    private var activeRequestIDs: Set<UUID> = []
+    private var activeRequestModels: [UUID: String] = [:]
+
+    func resetSessionTracking() {
+        sessionRequestCount = 0
+        pendingRequestCount = 0
+        failedRequestCount = 0
+        activeRequestIDs.removeAll()
+        activeRequestModels.removeAll()
+        activeModels.removeAll()
+        lastFailureAt = nil
+    }
+
+    func beginRequest(id: UUID, modelName: String?) {
+        sessionRequestCount += 1
+        activeRequestIDs.insert(id)
+        pendingRequestCount = activeRequestIDs.count
+        if let modelName, !modelName.isEmpty {
+            lastModelSeen = modelName
+            activeRequestModels[id] = modelName
+        }
+        refreshActiveModels()
+    }
+
+    func resolveRequest(id: UUID, modelName: String) {
+        guard activeRequestIDs.contains(id), !modelName.isEmpty else { return }
+        activeRequestModels[id] = modelName
+        lastUpstreamModelUsed = modelName
+        refreshActiveModels()
+    }
+
+    @discardableResult
+    func completeRequest(id: UUID) -> Bool {
+        guard activeRequestIDs.remove(id) != nil else { return false }
+        activeRequestModels.removeValue(forKey: id)
+        pendingRequestCount = activeRequestIDs.count
+        refreshActiveModels()
+        return true
+    }
+
+    @discardableResult
+    func failRequest(id: UUID) -> Bool {
+        guard activeRequestIDs.remove(id) != nil else { return false }
+        activeRequestModels.removeValue(forKey: id)
+        failedRequestCount += 1
+        pendingRequestCount = activeRequestIDs.count
+        lastFailureAt = Date()
+        refreshActiveModels()
+        return true
+    }
+
+    func failAllPendingRequests() {
+        let failedCount = activeRequestIDs.count
+        failedRequestCount += failedCount
+        activeRequestIDs.removeAll()
+        activeRequestModels.removeAll()
+        pendingRequestCount = 0
+        activeModels.removeAll()
+        if failedCount > 0 {
+            lastFailureAt = Date()
+        }
+    }
+
+    func importCompletedRequests(count: Int, lastModel: String?) {
+        sessionRequestCount = max(0, count)
+        pendingRequestCount = 0
+        failedRequestCount = 0
+        activeRequestIDs.removeAll()
+        activeRequestModels.removeAll()
+        activeModels.removeAll()
+        lastFailureAt = nil
+        if let lastModel, !lastModel.isEmpty {
+            lastModelSeen = lastModel
+        }
+    }
+
+    private func refreshActiveModels() {
+        activeModels = Set(activeRequestModels.values)
+    }
 }
 
 final class LocalProxyServer: @unchecked Sendable {
@@ -136,7 +220,7 @@ final class LocalProxyServer: @unchecked Sendable {
     func start(config: Config) throws {
         if listener != nil { throw ServerError.alreadyRunning }
         Task { @MainActor in
-            state.sessionRequestCount = 0
+            state.resetSessionTracking()
             state.lastModelSeen = ""
             state.lastUpstreamModelUsed = ""
             state.activeXcodeAgentModel = config.preferredAnthropicUpstreamModel
@@ -234,6 +318,7 @@ final class LocalProxyServer: @unchecked Sendable {
         listener.cancel()
         self.listener = nil
         Task { @MainActor in
+            state.failAllPendingRequests()
             state.isRunning = false
             state.lastStatus = "Stopped"
             state.activeXcodeAgentModel = ""
@@ -401,33 +486,41 @@ final class LocalProxyServer: @unchecked Sendable {
             return
         }
 
-        // Track AI request metrics
         if method == "POST" && (path == "/v1/chat/completions" || path == "/chat/completions" || path == "/v1/messages") {
+            let trackingID = UUID()
             let modelName = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.state.sessionRequestCount += 1
-                if let modelName, !modelName.isEmpty { self.state.lastModelSeen = modelName }
-            }
-        }
+            beginTrackedRequest(id: trackingID, modelName: modelName)
 
-        // POST /v1/chat/completions — OpenAI format
-        if method == "POST" && (path == "/v1/chat/completions" || path == "/chat/completions") {
+            if path == "/v1/messages" {
+                Task.detached { [weak self] in
+                    await self?.handleAnthropicMessages(
+                        body: body,
+                        headers: headers,
+                        connection: connection,
+                        config: config,
+                        trackingID: trackingID
+                    )
+                }
+                return
+            }
+
             let isStreaming = isStreamingRequest(body: body)
             Task.detached { [weak self] in
                 if isStreaming {
-                    await self?.handleStreamingChatCompletions(body: body, connection: connection, config: config)
+                    await self?.handleStreamingChatCompletions(
+                        body: body,
+                        connection: connection,
+                        config: config,
+                        trackingID: trackingID
+                    )
                 } else {
-                    await self?.handleChatCompletions(body: body, connection: connection, config: config)
+                    await self?.handleChatCompletions(
+                        body: body,
+                        connection: connection,
+                        config: config,
+                        trackingID: trackingID
+                    )
                 }
-            }
-            return
-        }
-
-        // POST /v1/messages — Anthropic format (agentic mode)
-        if method == "POST" && path == "/v1/messages" {
-            Task.detached { [weak self] in
-                await self?.handleAnthropicMessages(body: body, headers: headers, connection: connection, config: config)
             }
             return
         }
@@ -479,7 +572,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
     // MARK: - POST /v1/chat/completions (buffered)
 
-    private func handleChatCompletions(body: Data, connection: NWConnection, config: Config) async {
+    private func handleChatCompletions(body: Data, connection: NWConnection, config: Config, trackingID: UUID) async {
         let requestStartTime = Date()
         let requestModel = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String ?? ""
         if config.requiresUpstreamAPIKey {
@@ -490,6 +583,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: #"{"error":{"message":"Missing upstream API key","type":"invalid_request_error"}}"#,
                     contentType: "application/json"
                 )
+                await failTrackedRequest(id: trackingID)
                 return
             }
         }
@@ -504,6 +598,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: #"{"error":{"message":"Model not allowed","type":"invalid_request_error"}}"#,
                     contentType: "application/json"
                 )
+                await failTrackedRequest(id: trackingID)
                 return
             }
         }
@@ -555,26 +650,28 @@ final class LocalProxyServer: @unchecked Sendable {
                 config: config
             )
 
-            if normalized.statusCode == 200,
-               let json = try? JSONSerialization.jsonObject(with: normalized.data) as? [String: Any],
-               let usage = passthroughUsage(from: normalized.data) {
-                let resolvedModel = (json["model"] as? String).flatMap { value in
+            if normalized.statusCode == 200 {
+                let json = try? JSONSerialization.jsonObject(with: normalized.data) as? [String: Any]
+                let usage = passthroughUsage(from: normalized.data)
+                let resolvedModel = (json?["model"] as? String).flatMap { value in
                     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                     return trimmed.isEmpty ? nil : trimmed
                 } ?? requestModel
                 let record = SessionReportCard.RequestRecord(
                     timestamp: requestStartTime,
                     model: resolvedModel,
-                    promptTokens: usage.promptTokens ?? 0,
-                    completionTokens: usage.completionTokens ?? 0,
-                    promptCacheHitTokens: usage.promptCacheHitTokens,
-                    promptCacheMissTokens: usage.promptCacheMissTokens,
-                    promptCacheWriteTokens: usage.promptCacheWriteTokens,
+                    promptTokens: usage?.promptTokens ?? 0,
+                    completionTokens: usage?.completionTokens ?? 0,
+                    promptCacheHitTokens: usage?.promptCacheHitTokens,
+                    promptCacheMissTokens: usage?.promptCacheMissTokens,
+                    promptCacheWriteTokens: usage?.promptCacheWriteTokens,
                     durationSeconds: Date().timeIntervalSince(requestStartTime),
                     path: "/v1/chat/completions",
                     wasStreaming: false
                 )
-                recordSessionReport(record, config: config)
+                await recordSessionReport(record, config: config, trackingID: trackingID)
+            } else {
+                await failTrackedRequest(id: trackingID)
             }
         } catch {
             respond(
@@ -583,12 +680,13 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: #"{"error":{"message":"Upstream request failed","type":"server_error"}}"#,
                 contentType: "application/json"
             )
+            await failTrackedRequest(id: trackingID)
         }
     }
 
     // MARK: - POST /v1/chat/completions (streaming)
 
-    private func handleStreamingChatCompletions(body: Data, connection: NWConnection, config: Config) async {
+    private func handleStreamingChatCompletions(body: Data, connection: NWConnection, config: Config, trackingID: UUID) async {
         let requestStartTime = Date()
         let requestModel = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String ?? ""
         if config.requiresUpstreamAPIKey {
@@ -599,6 +697,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: #"{"error":{"message":"Missing upstream API key","type":"invalid_request_error"}}"#,
                     contentType: "application/json"
                 )
+                await failTrackedRequest(id: trackingID)
                 return
             }
         }
@@ -613,6 +712,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: #"{"error":{"message":"Model not allowed","type":"invalid_request_error"}}"#,
                     contentType: "application/json"
                 )
+                await failTrackedRequest(id: trackingID)
                 return
             }
         }
@@ -644,6 +744,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     errorBody = LocalProxyServerHelpers.openAIErrorJSON(message: entitlementMessage)
                 }
                 respond(connection: connection, status: httpStatus, body: errorBody, contentType: "application/json")
+                await failTrackedRequest(id: trackingID)
                 return
             }
 
@@ -701,7 +802,7 @@ final class LocalProxyServer: @unchecked Sendable {
                         path: "/v1/chat/completions",
                         wasStreaming: true
                     )
-                        recordSessionReport(record, config: config)
+                    await recordSessionReport(record, config: config, trackingID: trackingID)
                     await recordInputOutputLog(
                         inputBody: body,
                         outputBody: outputCapture.capturedOutput,
@@ -731,7 +832,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 path: "/v1/chat/completions",
                 wasStreaming: true
             )
-            recordSessionReport(record, config: config)
+            await recordSessionReport(record, config: config, trackingID: trackingID)
             await recordInputOutputLog(
                 inputBody: body,
                 outputBody: outputCapture.capturedOutput,
@@ -751,12 +852,13 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: #"{"error":{"message":"Upstream streaming failed","type":"server_error"}}"#,
                 contentType: "application/json"
             )
+            await failTrackedRequest(id: trackingID)
         }
     }
 
     // MARK: - POST /v1/messages (Anthropic API Translation)
 
-    private func handleAnthropicMessages(body: Data, headers: [String: String], connection: NWConnection, config: Config) async {
+    private func handleAnthropicMessages(body: Data, headers: [String: String], connection: NWConnection, config: Config, trackingID: UUID) async {
         let requestID = "req_\(UUID().uuidString.prefix(12).lowercased())"
 
         if config.requiresUpstreamAPIKey {
@@ -767,6 +869,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     body: AnthropicTranslator.errorJSON(message: "Missing upstream API key"),
                     contentType: "application/json"
                 )
+                await failTrackedRequest(id: trackingID)
                 return
             }
         }
@@ -778,6 +881,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 body: AnthropicTranslator.errorJSON(message: "Invalid JSON body"),
                 contentType: "application/json"
             )
+            await failTrackedRequest(id: trackingID)
             return
         }
         logIncomingAnthropicRequest(anthropicRequest, requestID: requestID, mode: config.anthropicTranslatorMode)
@@ -805,7 +909,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
             appendLog("anthropic passthrough: \(requestedModel) → \(upstreamModel) via \(passthroughBase)/v1/messages")
             Task { @MainActor [weak self] in
-                self?.state.lastUpstreamModelUsed = upstreamModel
+                self?.state.resolveRequest(id: trackingID, modelName: upstreamModel)
             }
 
             guard let passthroughURL = URL(string: passthroughBase + "/v1/messages") else {
@@ -830,6 +934,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     model: requestedModel,
                     reportModel: upstreamModel,
                     requestID: requestID,
+                    trackingID: trackingID,
                     connection: connection,
                     provider: config.upstreamProvider,
                     inputBody: body,
@@ -845,6 +950,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     model: requestedModel,
                     reportModel: upstreamModel,
                     requestID: requestID,
+                    trackingID: trackingID,
                     connection: connection,
                     provider: config.upstreamProvider,
                     inputBody: body,
@@ -867,7 +973,7 @@ final class LocalProxyServer: @unchecked Sendable {
         openAIBody["model"] = upstreamModel
         appendLog("anthropic model remap: \(requestedModel) → \(upstreamModel) (preferred=\(config.preferredAnthropicUpstreamModel))")
         Task { @MainActor [weak self] in
-            self?.state.lastUpstreamModelUsed = upstreamModel
+            self?.state.resolveRequest(id: trackingID, modelName: upstreamModel)
         }
 
         guard let openAIData = try? JSONSerialization.data(withJSONObject: openAIBody) else {
@@ -899,6 +1005,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     model: requestedModel,
                     reportModel: upstreamModel,
                     requestID: requestID,
+                    trackingID: trackingID,
                     translationContext: translationContext,
                     mode: config.anthropicTranslatorMode,
                     connection: connection,
@@ -911,6 +1018,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     model: requestedModel,
                     reportModel: upstreamModel,
                     requestID: requestID,
+                    trackingID: trackingID,
                     mode: config.anthropicTranslatorMode,
                     connection: connection,
                     inputBody: body,
@@ -927,6 +1035,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 model: requestedModel,
                 reportModel: upstreamModel,
                 requestID: requestID,
+                trackingID: trackingID,
                 translationContext: translationContext,
                 mode: config.anthropicTranslatorMode,
                 connection: connection,
@@ -941,6 +1050,7 @@ final class LocalProxyServer: @unchecked Sendable {
         model: String,
         reportModel: String,
         requestID: String,
+        trackingID: UUID,
         translationContext: AnthropicTranslator.TranslationContext,
         mode: AnthropicTranslatorMode,
         connection: NWConnection,
@@ -967,6 +1077,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     ),
                     contentType: "application/json"
                 )
+                await failTrackedRequest(id: trackingID)
                 return
             }
 
@@ -978,25 +1089,25 @@ final class LocalProxyServer: @unchecked Sendable {
                     contentType: "application/json"
                 )
                 recordXcodeAgentRequest(model: reportModel, status: 502)
+                await failTrackedRequest(id: trackingID)
                 return
             }
             logUpstreamResponse(openAIResponse, requestID: requestID, mode: mode, streaming: false)
 
-            if let usage = openAIResponse["usage"] as? [String: Any] {
-                let usageSnapshot = AnthropicTranslator.anthropicPassthroughUsage(from: data)
-                let record = SessionReportCard.RequestRecord(
-                    timestamp: requestStartTime,
-                    model: reportModel,
-                    promptTokens: usage["prompt_tokens"] as? Int ?? 0,
-                    completionTokens: usage["completion_tokens"] as? Int ?? 0,
-                    promptCacheHitTokens: usageSnapshot?.promptCacheHitTokens,
-                    promptCacheMissTokens: usageSnapshot?.promptCacheMissTokens,
-                    durationSeconds: Date().timeIntervalSince(requestStartTime),
-                    path: "/v1/messages",
-                    wasStreaming: false
-                )
-                recordSessionReport(record, config: config)
-            }
+            let usage = openAIResponse["usage"] as? [String: Any]
+            let usageSnapshot = AnthropicTranslator.anthropicPassthroughUsage(from: data)
+            let record = SessionReportCard.RequestRecord(
+                timestamp: requestStartTime,
+                model: reportModel,
+                promptTokens: usage?["prompt_tokens"] as? Int ?? 0,
+                completionTokens: usage?["completion_tokens"] as? Int ?? 0,
+                promptCacheHitTokens: usageSnapshot?.promptCacheHitTokens,
+                promptCacheMissTokens: usageSnapshot?.promptCacheMissTokens,
+                durationSeconds: Date().timeIntervalSince(requestStartTime),
+                path: "/v1/messages",
+                wasStreaming: false
+            )
+            await recordSessionReport(record, config: config, trackingID: trackingID)
 
             let anthropicResponse = AnthropicTranslator.responseFromOpenAI(
                 openAIResponse,
@@ -1026,6 +1137,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     contentType: "application/json"
                 )
                 recordXcodeAgentRequest(model: reportModel, status: 500)
+                await failTrackedRequest(id: trackingID)
             }
         } catch {
             respond(
@@ -1035,6 +1147,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
+            await failTrackedRequest(id: trackingID)
         }
     }
 
@@ -1043,6 +1156,7 @@ final class LocalProxyServer: @unchecked Sendable {
         model: String,
         reportModel: String,
         requestID: String,
+        trackingID: UUID,
         mode: AnthropicTranslatorMode,
         connection: NWConnection,
         inputBody: Data,
@@ -1069,6 +1183,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     ),
                     contentType: "application/json"
                 )
+                await failTrackedRequest(id: trackingID)
                 return
             }
 
@@ -1105,7 +1220,7 @@ final class LocalProxyServer: @unchecked Sendable {
                         durationSeconds: Date().timeIntervalSince(requestStartTime),
                         path: "/v1/messages", wasStreaming: true
                     )
-                    recordSessionReport(record, config: config)
+                    await recordSessionReport(record, config: config, trackingID: trackingID)
                     await recordInputOutputLog(
                         inputBody: inputBody,
                         outputBody: outputCapture.capturedOutput,
@@ -1182,7 +1297,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/messages", wasStreaming: true
             )
-            recordSessionReport(record, config: config)
+            await recordSessionReport(record, config: config, trackingID: trackingID)
             await recordInputOutputLog(
                 inputBody: inputBody,
                 outputBody: outputCapture.capturedOutput,
@@ -1204,6 +1319,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
+            await failTrackedRequest(id: trackingID)
         }
     }
 
@@ -1212,6 +1328,7 @@ final class LocalProxyServer: @unchecked Sendable {
         model: String,
         reportModel: String,
         requestID: String,
+        trackingID: UUID,
         translationContext: AnthropicTranslator.TranslationContext,
         mode: AnthropicTranslatorMode,
         connection: NWConnection,
@@ -1239,6 +1356,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     ),
                     contentType: "application/json"
                 )
+                await failTrackedRequest(id: trackingID)
                 return
             }
 
@@ -1296,7 +1414,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 durationSeconds: Date().timeIntervalSince(requestStartTime),
                 path: "/v1/messages", wasStreaming: true
             )
-            recordSessionReport(record, config: config)
+            await recordSessionReport(record, config: config, trackingID: trackingID)
             await recordInputOutputLog(
                 inputBody: inputBody,
                 outputBody: outputCapture.capturedOutput,
@@ -1318,6 +1436,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
+            await failTrackedRequest(id: trackingID)
         }
     }
 
@@ -1328,6 +1447,7 @@ final class LocalProxyServer: @unchecked Sendable {
         model: String,
         reportModel: String,
         requestID: String,
+        trackingID: UUID,
         connection: NWConnection,
         provider: UpstreamProvider = .miniMax,
         inputBody: Data,
@@ -1361,7 +1481,9 @@ final class LocalProxyServer: @unchecked Sendable {
                     path: "/v1/messages",
                     wasStreaming: false
                 )
-                recordSessionReport(record, config: config)
+                await recordSessionReport(record, config: config, trackingID: trackingID)
+            } else {
+                await failTrackedRequest(id: trackingID)
             }
             await recordInputOutputLog(
                 inputBody: inputBody,
@@ -1385,6 +1507,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
+            await failTrackedRequest(id: trackingID)
         }
     }
 
@@ -1393,6 +1516,7 @@ final class LocalProxyServer: @unchecked Sendable {
         model: String,
         reportModel: String,
         requestID: String,
+        trackingID: UUID,
         connection: NWConnection,
         provider: UpstreamProvider = .miniMax,
         inputBody: Data,
@@ -1416,6 +1540,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 let text = String(decoding: errorData, as: UTF8.self)
                 respond(connection: connection, status: statusCode, body: text, contentType: "application/json")
                 recordXcodeAgentRequest(model: reportModel, status: statusCode)
+                await failTrackedRequest(id: trackingID)
                 return
             }
 
@@ -1467,7 +1592,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     path: "/v1/messages",
                     wasStreaming: true
                 )
-                recordSessionReport(record, config: config)
+                await recordSessionReport(record, config: config, trackingID: trackingID)
             }
             appendLog("passthrough streaming complete: model=\(lastSeenModel)")
             await recordInputOutputLog(
@@ -1491,6 +1616,7 @@ final class LocalProxyServer: @unchecked Sendable {
                 contentType: "application/json"
             )
             recordXcodeAgentRequest(model: reportModel, status: 502)
+            await failTrackedRequest(id: trackingID)
         }
     }
 
@@ -1501,6 +1627,18 @@ final class LocalProxyServer: @unchecked Sendable {
             connection.send(content: data, completion: .contentProcessed { _ in
                 continuation.resume()
             })
+        }
+    }
+
+    private func beginTrackedRequest(id: UUID, modelName: String?) {
+        Task { @MainActor [weak self] in
+            self?.state.beginRequest(id: id, modelName: modelName)
+        }
+    }
+
+    private func failTrackedRequest(id: UUID) async {
+        await MainActor.run { [weak self] in
+            _ = self?.state.failRequest(id: id)
         }
     }
 
@@ -1530,12 +1668,20 @@ final class LocalProxyServer: @unchecked Sendable {
         )
     }
 
-    private func recordSessionReport(_ record: SessionReportCard.RequestRecord, config: Config) {
+    private func recordSessionReport(
+        _ record: SessionReportCard.RequestRecord,
+        config: Config,
+        trackingID: UUID
+    ) async {
         let record = recordWithAllowedCacheTelemetry(record, promptCaching: config.promptCaching)
         let currentSessionID = config.sessionID
-        Task { @MainActor [weak self] in
-            self?.reportCard.record(record)
+        let shouldRecord = await MainActor.run { [weak self] in
+            guard let self else { return false }
+            guard self.state.completeRequest(id: trackingID) else { return false }
+            self.reportCard.record(record)
+            return true
         }
+        guard shouldRecord else { return }
 
         let coreRecord = RequestRecord(
             timestamp: record.timestamp,

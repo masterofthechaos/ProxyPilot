@@ -382,6 +382,44 @@ final class SessionHistorySessionTests: XCTestCase {
         XCTAssertEqual(viewModels.map(\.tokenCounts), [nil, nil])
     }
 
+    func testInputOutputLogViewModelsOmitTokenCountsWhenProviderDidNotReturnUsage() {
+        let timestamp = Date(timeIntervalSince1970: 100)
+        let log = InputOutputLogRecord(
+            timestamp: timestamp,
+            source: "gui",
+            sessionID: "target",
+            path: "/v1/messages",
+            model: "qwen/qwen3.5-9b",
+            provider: "lmstudio",
+            wasStreaming: true,
+            statusCode: 200,
+            retentionExpiresAt: nil,
+            input: .utf8("prompt"),
+            output: .utf8("output")
+        )
+        let session = SessionHistorySession(
+            id: "target",
+            source: "gui",
+            requests: [
+                RequestRecord(
+                    timestamp: timestamp,
+                    model: "qwen/qwen3.5-9b",
+                    promptTokens: 0,
+                    completionTokens: 0,
+                    durationSeconds: 101.32,
+                    path: "/v1/messages",
+                    wasStreaming: true
+                )
+            ]
+        )
+
+        let viewModels = SessionHistoryLogRecordViewModel.matching([log], session: session)
+
+        XCTAssertEqual(viewModels.count, 1)
+        XCTAssertNil(viewModels.first?.tokenCounts)
+        XCTAssertFalse(session.tokenAccountingAvailable)
+    }
+
     func testSessionHistoryDisplayPolicyCapsRequestsByDefault() {
         let requests = (0..<37).map { index in
             RequestRecord(

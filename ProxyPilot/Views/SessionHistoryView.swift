@@ -18,6 +18,12 @@ struct SessionHistoryView: View {
         }
     }
 
+    private enum RequestTokenKind {
+        case prompt
+        case completion
+        case total
+    }
+
     @EnvironmentObject private var vm: AppViewModel
 
     let prefersCompactLayout: Bool
@@ -181,8 +187,7 @@ struct SessionHistoryView: View {
             set: { selectedSessionID = $0 }
         )) {
             ForEach(vm.sessionHistorySessions) { session in
-                let totalTokens = session.totalTokensFormatted
-                Text("\(session.source.uppercased()) - \(session.requestCount) req - \(totalTokens)")
+                Text("\(session.source.uppercased()) - \(session.requestCount) req - \(sessionTokenSummary(session))")
                     .tag(Optional(session.id))
             }
         }
@@ -192,8 +197,7 @@ struct SessionHistoryView: View {
     @ViewBuilder
     private var selectedSessionSummary: some View {
         if let session = selectedSession {
-            let totalTokens = session.totalTokensFormatted
-            Text("\(session.requestCount) req - \(totalTokens) tokens")
+            Text("\(session.requestCount) req - \(sessionTokenSummary(session))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -512,19 +516,26 @@ struct SessionHistoryView: View {
     }
 
     private func metricGrid(_ session: SessionHistorySession) -> some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 12)], alignment: .leading, spacing: 12) {
-            metric("Requests", "\(session.requestCount)")
-            metric("Prompt", "\(session.totalPromptTokens)")
-            metric("Completion", "\(session.totalCompletionTokens)")
-            metric("Total", session.totalTokensFormatted)
-            if session.cacheAccountingAvailable {
-                metric("Cached", formatCompactInteger(session.totalPromptCacheHitTokens))
-                metric("Uncached", formatCompactInteger(session.totalPromptCacheMissTokens))
-                if session.totalPromptCacheWriteTokens > 0 {
-                    metric("Cache Write", formatCompactInteger(session.totalPromptCacheWriteTokens))
+        VStack(alignment: .leading, spacing: 10) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 12)], alignment: .leading, spacing: 12) {
+                metric("Requests", "\(session.requestCount)")
+                metric("Prompt", session.tokenAccountingAvailable ? "\(session.totalPromptTokens)" : "Unavailable")
+                metric("Completion", session.tokenAccountingAvailable ? "\(session.totalCompletionTokens)" : "Unavailable")
+                metric("Total", session.tokenAccountingAvailable ? session.totalTokensFormatted : "Unavailable")
+                if session.cacheAccountingAvailable {
+                    metric("Cached", formatCompactInteger(session.totalPromptCacheHitTokens))
+                    metric("Uncached", formatCompactInteger(session.totalPromptCacheMissTokens))
+                    if session.totalPromptCacheWriteTokens > 0 {
+                        metric("Cache Write", formatCompactInteger(session.totalPromptCacheWriteTokens))
+                    }
                 }
+                metric("P95", session.p95Latency.map(formatLatency) ?? "No data")
             }
-            metric("P95", session.p95Latency.map(formatLatency) ?? "No data")
+            if !session.tokenAccountingAvailable, session.requestCount > 0 {
+                Text("ProxyPilot did not receive usable token counts from the upstream response for this session.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -681,9 +692,9 @@ struct SessionHistoryView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         detailRow("Path", request.path)
                         detailRow("Streaming", request.wasStreaming ? "Yes" : "No")
-                        detailRow("Prompt", "\(request.promptTokens)")
-                        detailRow("Completion", "\(request.completionTokens)")
-                        detailRow("Total", "\(request.promptTokens + request.completionTokens)")
+                        detailRow("Prompt", requestTokenValue(request, kind: .prompt))
+                        detailRow("Completion", requestTokenValue(request, kind: .completion))
+                        detailRow("Total", requestTokenValue(request, kind: .total))
                         if let hit = request.promptCacheHitTokens {
                             detailRow("Cached", "\(hit)")
                         }
@@ -714,7 +725,7 @@ struct SessionHistoryView: View {
                             .lineLimit(1)
                             .truncationMode(.middle)
                         Spacer()
-                        Text("\(request.promptTokens + request.completionTokens) tok")
+                        Text(requestInlineTokenSummary(request))
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         if let hit = request.promptCacheHitTokens, hit > 0 {
@@ -1060,6 +1071,35 @@ struct SessionHistoryView: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 3)
             .background(Color.secondary.opacity(0.10), in: Capsule())
+    }
+
+    private func sessionTokenSummary(_ session: SessionHistorySession) -> String {
+        session.tokenAccountingAvailable ? "\(session.totalTokensFormatted) tokens" : "token usage unavailable"
+    }
+
+    private func requestHasTokenTelemetry(_ request: RequestRecord) -> Bool {
+        request.promptTokens > 0
+            || request.completionTokens > 0
+            || request.promptCacheHitTokens != nil
+            || request.promptCacheMissTokens != nil
+            || request.promptCacheWriteTokens != nil
+    }
+
+    private func requestTokenValue(_ request: RequestRecord, kind: RequestTokenKind) -> String {
+        guard requestHasTokenTelemetry(request) else { return "Unavailable" }
+        switch kind {
+        case .prompt:
+            return "\(request.promptTokens)"
+        case .completion:
+            return "\(request.completionTokens)"
+        case .total:
+            return "\(request.promptTokens + request.completionTokens)"
+        }
+    }
+
+    private func requestInlineTokenSummary(_ request: RequestRecord) -> String {
+        guard requestHasTokenTelemetry(request) else { return "token usage unavailable" }
+        return "\(request.promptTokens + request.completionTokens) tok"
     }
 
     private func compactLogMetric(_ label: String, _ value: String) -> some View {

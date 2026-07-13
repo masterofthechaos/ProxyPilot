@@ -29,4 +29,13 @@ final class SettingsSectionTests: XCTestCase {
         XCTAssertEqual(ProxySectionFocus.models.rawValue, "models")
         XCTAssertEqual(ProxySectionFocus.models.highlightDurationSeconds, 4)
     }
+
+    func testModelSelectionListLayoutStaysBoundedForLargeProviderCatalogs() {
+        // Pins the bounded-scroll cap so a provider with hundreds of non-collapsible
+        // models (e.g. OpenRouter) can't silently regress back to an unbounded frame
+        // that pushes the Xcode/Agent sections off screen.
+        XCTAssertEqual(ModelSelectionListLayout.minHeight, 120)
+        XCTAssertEqual(ModelSelectionListLayout.maxHeight, 400)
+        XCTAssertLessThan(ModelSelectionListLayout.minHeight, ModelSelectionListLayout.maxHeight)
+    }
 }

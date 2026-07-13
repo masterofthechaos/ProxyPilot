@@ -17,6 +17,7 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
         let totalPromptCacheHitTokens: Int
         let totalPromptCacheMissTokens: Int
         let totalPromptCacheWriteTokens: Int
+        let tokenAccountingAvailable: Bool
         let cacheAccountingAvailable: Bool
         let cacheHitRate: Double?
         let totalTokensFormatted: String
@@ -38,6 +39,7 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
     var totalPromptCacheHitTokens: Int { summary.totalPromptCacheHitTokens }
     var totalPromptCacheMissTokens: Int { summary.totalPromptCacheMissTokens }
     var totalPromptCacheWriteTokens: Int { summary.totalPromptCacheWriteTokens }
+    var tokenAccountingAvailable: Bool { summary.tokenAccountingAvailable }
     var cacheAccountingAvailable: Bool { summary.cacheAccountingAvailable }
     var cacheHitRate: Double? { summary.cacheHitRate }
     var totalTokensFormatted: String { summary.totalTokensFormatted }
@@ -77,6 +79,7 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
         var totalPromptCacheWriteTokens = 0
         var modelCounts: [String: Int] = [:]
         var durations: [TimeInterval] = []
+        var tokenAccountingAvailable = false
         durations.reserveCapacity(requests.count)
 
         for request in requests {
@@ -89,6 +92,13 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
             totalPromptCacheHitTokens += request.promptCacheHitTokens ?? 0
             totalPromptCacheMissTokens += request.promptCacheMissTokens ?? 0
             totalPromptCacheWriteTokens += request.promptCacheWriteTokens ?? 0
+            if request.promptTokens > 0
+                || request.completionTokens > 0
+                || request.promptCacheHitTokens != nil
+                || request.promptCacheMissTokens != nil
+                || request.promptCacheWriteTokens != nil {
+                tokenAccountingAvailable = true
+            }
             modelCounts[request.model, default: 0] += 1
             durations.append(request.durationSeconds)
         }
@@ -107,6 +117,7 @@ struct SessionHistorySession: Identifiable, Equatable, Sendable {
             totalPromptCacheHitTokens: totalPromptCacheHitTokens,
             totalPromptCacheMissTokens: totalPromptCacheMissTokens,
             totalPromptCacheWriteTokens: totalPromptCacheWriteTokens,
+            tokenAccountingAvailable: tokenAccountingAvailable,
             cacheAccountingAvailable: totalPromptCacheHitTokens > 0
                 || totalPromptCacheMissTokens > 0
                 || totalPromptCacheWriteTokens > 0,
@@ -291,7 +302,9 @@ struct SessionHistoryLogRecordViewModel: Identifiable, Equatable {
             guard candidates.count == 1, let match = candidates.first else {
                 return [:]
             }
-            tokenCountsByRecordID[record.id] = SessionHistoryLogTokenCounts(request: match.element)
+            if let tokenCounts = SessionHistoryLogTokenCounts(request: match.element) {
+                tokenCountsByRecordID[record.id] = tokenCounts
+            }
             remainingRequests.remove(at: match.offset)
         }
 
@@ -306,7 +319,8 @@ struct SessionHistoryLogTokenCounts: Equatable {
     let promptCacheMissTokens: Int?
     let promptCacheWriteTokens: Int?
 
-    init(request: RequestRecord) {
+    init?(request: RequestRecord) {
+        guard request.hasTokenTelemetry else { return nil }
         self.promptTokens = request.promptTokens
         self.completionTokens = request.completionTokens
         self.promptCacheHitTokens = request.promptCacheHitTokens
@@ -315,6 +329,16 @@ struct SessionHistoryLogTokenCounts: Equatable {
     }
 
     var totalTokens: Int { promptTokens + completionTokens }
+}
+
+private extension RequestRecord {
+    var hasTokenTelemetry: Bool {
+        promptTokens > 0
+            || completionTokens > 0
+            || promptCacheHitTokens != nil
+            || promptCacheMissTokens != nil
+            || promptCacheWriteTokens != nil
+    }
 }
 
 extension InputOutputLogContent {

@@ -955,6 +955,44 @@ struct NIOProxyServerTests {
         try await server.stop()
     }
 
+    @Test func anthropicMessagesIncludesUpstreamErrorDetailWhenProviderRejects() async throws {
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 403,
+            body: #"{"error":{"message":"Context limit exceeded for this account"}}"#,
+            requireJSONRequest: true
+        )
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
+            requiresAuth: false,
+            preferredAnthropicUpstreamModel: "test-model"
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-sonnet-4-5-20250514",
+            "max_tokens": 100,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let httpResponse = response as! HTTPURLResponse
+        let body = String(decoding: data, as: UTF8.self)
+
+        #expect(httpResponse.statusCode == 502)
+        #expect(body.contains("Upstream returned status 403"))
+        #expect(body.contains("Context limit exceeded for this account"))
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
     @Test func anthropicMessagesRejectsDisallowedModelBeforeForwarding() async throws {
         let stub = StubUpstream()
         let stubPort = try await stub.start(statusCode: 200, body: "{\"id\":\"should-not-forward\"}")
