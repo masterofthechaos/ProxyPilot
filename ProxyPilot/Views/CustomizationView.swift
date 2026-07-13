@@ -67,6 +67,17 @@ struct CustomizationView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Toggle("Interactive Dock Tile", isOn: Binding(
+                get: { vm.dockTileInteractiveEnabled },
+                set: { vm.setDockTileInteractiveEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .help("Replaces the Dock icon with a live LED-style model marquee and activity ring while ProxyPilot is running. Off by default.")
+
+            Text("Shows the active model and request activity directly on the Dock icon instead of the plain app icon.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

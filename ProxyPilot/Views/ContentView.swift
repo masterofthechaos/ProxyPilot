@@ -2,6 +2,14 @@ import AppKit
 import ProxyPilotCore
 import SwiftUI
 
+/// Bounds for the Proxy page's "Fetch Live Models" list. `maxHeight` keeps a provider
+/// with hundreds of non-collapsible models (OpenRouter in particular) scrolling inside
+/// its own box instead of pushing the Xcode/Agent sections off screen.
+enum ModelSelectionListLayout {
+    static let minHeight: CGFloat = 120
+    static let maxHeight: CGFloat = 400
+}
+
 struct ContentView: View {
     @EnvironmentObject private var vm: AppViewModel
     @EnvironmentObject private var updateService: SoftwareUpdateService
@@ -748,25 +756,39 @@ struct ContentView: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        List(filteredModelRows) { row in
-                            HStack(spacing: 10) {
-                                Toggle(isOn: Binding(
-                                    get: { vm.isModelSelected(row.id) },
-                                    set: { vm.setModelSelected(row.id, isSelected: $0) }
-                                )) {
-                                    modelSelectionRowLabel(row)
-                                }
-                                .disabled(row.isDefault)
+                        // A plain `List` here gets flattened into the enclosing Form's own
+                        // List-backed scroll view on macOS (.formStyle(.grouped) is List-backed),
+                        // so trackpad/wheel scroll over the rows moves the whole Settings page
+                        // instead of the bounded box. An explicit ScrollView keeps its own
+                        // independent scroll region so the cap in ModelSelectionListLayout is
+                        // actually reachable by scrolling, not just a visual clip.
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(filteredModelRows) { row in
+                                    HStack(spacing: 10) {
+                                        Toggle(isOn: Binding(
+                                            get: { vm.isModelSelected(row.id) },
+                                            set: { vm.setModelSelected(row.id, isSelected: $0) }
+                                        )) {
+                                            modelSelectionRowLabel(row)
+                                        }
+                                        .disabled(row.isDefault)
 
-                                if row.isDefault {
-                                    Button("Remove Default") {
-                                        vm.removeDefaultModel(row.id)
+                                        if row.isDefault {
+                                            Button("Remove Default") {
+                                                vm.removeDefaultModel(row.id)
+                                            }
+                                            .font(.caption)
+                                        }
                                     }
-                                    .font(.caption)
+                                    .padding(.vertical, 4)
+
+                                    Divider()
                                 }
                             }
                         }
-                        .frame(minHeight: 120)
+                        .frame(minHeight: ModelSelectionListLayout.minHeight, maxHeight: ModelSelectionListLayout.maxHeight)
+                        .scrollIndicators(.visible)
                     }
                 }
                 .onChange(of: vm.upstreamProvider) { _, _ in

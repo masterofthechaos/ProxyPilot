@@ -65,10 +65,12 @@ struct HomeDashboardView: View {
 
                 ViewThatFits {
                     HStack(spacing: 12) {
-                        heroMetric("Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right")
+                        heroMetric("Completed Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right") {
+                            requestStatusDetail
+                        }
                         heroMetric(
                             "Tokens",
-                            vm.sessionReportCard.totalTokensFormatted,
+                            sessionTokenMetricValue,
                             systemImage: "number"
                         ) {
                             tokenDirectionDetail
@@ -79,10 +81,12 @@ struct HomeDashboardView: View {
                     }
 
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
-                        heroMetric("Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right")
+                        heroMetric("Completed Requests", "\(vm.sessionReportCard.totalRequests)", systemImage: "arrow.left.arrow.right") {
+                            requestStatusDetail
+                        }
                         heroMetric(
                             "Tokens",
-                            vm.sessionReportCard.totalTokensFormatted,
+                            sessionTokenMetricValue,
                             systemImage: "number"
                         ) {
                             tokenDirectionDetail
@@ -198,6 +202,81 @@ struct HomeDashboardView: View {
     }
 
     private var xcodeAgentControls: some View {
+        Group {
+            if vm.showsAgentModeChoice && vm.selectedAgentMode == .proxyPilotAgent {
+                proxyPilotAgentControls
+            } else {
+                xcodeClaudeAgentControls
+            }
+        }
+    }
+
+    private var proxyPilotAgentControls: some View {
+        DashboardCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("ProxyPilot Agent")
+                        .font(.headline)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer()
+                    Text(vm.agentRuntimeStatus.isReady ? "Ready" : "Not Installed")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(vm.agentRuntimeStatus.isReady ? .green : .secondary)
+                }
+
+                Text("ProxyPilot manages the pinned Node and agent adapter runtime, keeps Xcode pointed at a stable launcher path, and routes the agent through your current ProxyPilot provider and model.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text(vm.proxyPilotAgentStatusText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                ViewThatFits {
+                    HStack(spacing: 12) {
+                        proxyPilotAgentButtonGroup
+                        Spacer()
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        proxyPilotAgentButtonGroup
+                    }
+                }
+
+                Button { onOpenProxy() } label: {
+                    Text("Full setup and verification in **Proxy**.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var proxyPilotAgentButtonGroup: some View {
+        compactControlGroup {
+            HStack(spacing: 2) {
+                controlStripButton(
+                    vm.isInstallingProxyPilotAgent ? "Installing..." : "Install or Repair",
+                    systemImage: "arrow.down.doc",
+                    isDisabled: vm.isInstallingProxyPilotAgent
+                ) {
+                    Task { await vm.installProxyPilotAgent() }
+                }
+                controlStripDivider
+                controlStripButton("Remove", systemImage: "trash", isDisabled: vm.isInstallingProxyPilotAgent, role: .destructive) {
+                    Task { await vm.removeProxyPilotAgent() }
+                }
+                controlStripDivider
+                controlStripButton("Refresh", systemImage: "arrow.triangle.2.circlepath", isDisabled: vm.isInstallingProxyPilotAgent) {
+                    Task { await vm.refreshProxyPilotAgentState() }
+                }
+            }
+        }
+    }
+
+    private var xcodeClaudeAgentControls: some View {
         DashboardCard {
             VStack(alignment: .leading, spacing: 12) {
                 ViewThatFits {
@@ -452,9 +531,9 @@ struct HomeDashboardView: View {
     private var sessionMetricGrid: some View {
         ViewThatFits {
             HStack(spacing: 18) {
-                smallMetric("Prompt", "\(vm.sessionReportCard.totalPromptTokens)")
-                smallMetric("Completion", "\(vm.sessionReportCard.totalCompletionTokens)")
-                smallMetric("Total", vm.sessionReportCard.totalTokensFormatted)
+                smallMetric("Prompt", sessionReportTokenValue(vm.sessionReportCard.totalPromptTokens))
+                smallMetric("Completion", sessionReportTokenValue(vm.sessionReportCard.totalCompletionTokens))
+                smallMetric("Total", sessionTokenMetricValue)
                 smallMetric(vm.sessionCacheMetricLabel, vm.sessionCacheMetricValue)
                 smallMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD))
                 if let latency = vm.sessionLatencySummary {
@@ -463,9 +542,9 @@ struct HomeDashboardView: View {
             }
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 12)], alignment: .leading, spacing: 12) {
-                smallMetric("Prompt", "\(vm.sessionReportCard.totalPromptTokens)")
-                smallMetric("Completion", "\(vm.sessionReportCard.totalCompletionTokens)")
-                smallMetric("Total", vm.sessionReportCard.totalTokensFormatted)
+                smallMetric("Prompt", sessionReportTokenValue(vm.sessionReportCard.totalPromptTokens))
+                smallMetric("Completion", sessionReportTokenValue(vm.sessionReportCard.totalCompletionTokens))
+                smallMetric("Total", sessionTokenMetricValue)
                 smallMetric(vm.sessionCacheMetricLabel, vm.sessionCacheMetricValue)
                 smallMetric(vm.sessionCostMetricLabel, vm.formatUSD(vm.sessionEstimatedCostUSD))
                 if let latency = vm.sessionLatencySummary {
@@ -536,9 +615,9 @@ struct HomeDashboardView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 requestDetailRow(label: "Path", value: request.path)
                                 requestDetailRow(label: "Streaming", value: request.wasStreaming ? "Yes" : "No")
-                                requestDetailRow(label: "Prompt", value: "\(request.promptTokens)")
-                                requestDetailRow(label: "Completion", value: "\(request.completionTokens)")
-                                requestDetailRow(label: "Total", value: "\(request.totalTokens)")
+                                requestDetailRow(label: "Prompt", value: sessionRequestTokenValue(request.promptTokens, request: request))
+                                requestDetailRow(label: "Completion", value: sessionRequestTokenValue(request.completionTokens, request: request))
+                                requestDetailRow(label: "Total", value: sessionRequestTotalValue(request))
                                 if let hit = request.promptCacheHitTokens {
                                     requestDetailRow(label: "Cached", value: "\(hit)")
                                 }
@@ -577,7 +656,7 @@ struct HomeDashboardView: View {
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                     Spacer()
-                                    Text("\(request.totalTokens) tok")
+                                    Text(sessionRequestInlineTokenSummary(request))
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                     if let hit = request.promptCacheHitTokens, hit > 0 {
@@ -607,15 +686,65 @@ struct HomeDashboardView: View {
 
     private var tokenDirectionDetail: some View {
         HStack(spacing: 7) {
+            if vm.sessionReportCard.tokenAccountingAvailable {
+                tokenDirectionValue(
+                    systemImage: "arrow.up",
+                    value: formatCompactInteger(vm.sessionReportCard.totalPromptTokens),
+                    help: "Prompt tokens"
+                )
+                tokenDirectionValue(
+                    systemImage: "arrow.down",
+                    value: formatCompactInteger(vm.sessionReportCard.totalCompletionTokens),
+                    help: "Completion tokens"
+                )
+            } else if vm.sessionReportCard.totalRequests > 0 {
+                Text("Provider did not return token usage")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .foregroundStyle(.secondary)
+    }
+
+    private var sessionTokenMetricValue: String {
+        if vm.sessionReportCard.tokenAccountingAvailable {
+            return vm.sessionReportCard.totalTokensFormatted
+        }
+        return vm.sessionReportCard.totalRequests > 0 ? "Unavailable" : "0"
+    }
+
+    private func sessionReportTokenValue(_ value: Int) -> String {
+        vm.sessionReportCard.tokenAccountingAvailable ? "\(value)" : (vm.sessionReportCard.totalRequests > 0 ? "Unavailable" : "0")
+    }
+
+    private func sessionRequestHasTokenTelemetry(_ request: SessionReportCard.RequestRecord) -> Bool {
+        request.hasTokenTelemetry
+    }
+
+    private func sessionRequestTokenValue(_ value: Int, request: SessionReportCard.RequestRecord) -> String {
+        sessionRequestHasTokenTelemetry(request) ? "\(value)" : "Unavailable"
+    }
+
+    private func sessionRequestTotalValue(_ request: SessionReportCard.RequestRecord) -> String {
+        sessionRequestHasTokenTelemetry(request) ? "\(request.totalTokens)" : "Unavailable"
+    }
+
+    private func sessionRequestInlineTokenSummary(_ request: SessionReportCard.RequestRecord) -> String {
+        sessionRequestHasTokenTelemetry(request) ? "\(request.totalTokens) tok" : "token usage unavailable"
+    }
+
+    private var requestStatusDetail: some View {
+        HStack(spacing: 7) {
             tokenDirectionValue(
-                systemImage: "arrow.up",
-                value: formatCompactInteger(vm.sessionReportCard.totalPromptTokens),
-                help: "Prompt tokens"
+                systemImage: "hourglass",
+                value: formatCompactInteger(vm.localProxyState.pendingRequestCount),
+                help: "Requests still running or waiting for a final response"
             )
             tokenDirectionValue(
-                systemImage: "arrow.down",
-                value: formatCompactInteger(vm.sessionReportCard.totalCompletionTokens),
-                help: "Completion tokens"
+                systemImage: "exclamationmark.triangle",
+                value: formatCompactInteger(vm.localProxyState.failedRequestCount),
+                help: "Requests that ended without a completed session record"
             )
         }
         .foregroundStyle(.secondary)
@@ -817,7 +946,10 @@ struct HomeDashboardView: View {
 
         do {
             try csv.write(to: url, atomically: true, encoding: .utf8)
-            sessionCSVExportStatus = "Exported \(vm.sessionReportCard.totalRequests) requests to \(url.path)"
+            // Report the rows actually written (the retained history window),
+            // not the unbounded session total — CSV export only covers what's in
+            // the bounded `requests` buffer.
+            sessionCSVExportStatus = "Exported \(vm.sessionReportCard.requests.count) requests to \(url.path)"
         } catch {
             sessionCSVExportStatus = "CSV export failed: \(error.localizedDescription)"
         }

@@ -60,6 +60,7 @@ final class AppViewModel: ObservableObject {
     private static let didCompleteOnboardingDefaultsKey = "proxypilot.didCompleteOnboarding"
     private static let telemetryOptInDefaultsKey = "proxypilot.telemetryOptIn"
     private static let liquidGlassEnabledDefaultsKey = "proxypilot.liquidGlassEnabled"
+    static let dockTileInteractiveEnabledDefaultsKey = "proxypilot.dockTileInteractiveEnabled"
     private static let inputOutputLoggingEnabledDefaultsKey = "proxypilot.inputOutputLogging.enabled"
     private static let inputOutputLoggingRecordInputsDefaultsKey = "proxypilot.inputOutputLogging.recordInputs"
     private static let inputOutputLoggingRecordOutputsDefaultsKey = "proxypilot.inputOutputLogging.recordOutputs"
@@ -393,7 +394,7 @@ final class AppViewModel: ObservableObject {
     /// Reset session report card AND menu bar counters so both surfaces stay in sync.
     func resetSessionStats() {
         localProxyServer.reportCard.reset()
-        localProxyServer.state.sessionRequestCount = 0
+        localProxyServer.state.resetSessionTracking()
         localProxyServer.state.lastModelSeen = ""
         localProxyServer.state.lastUpstreamModelUsed = ""
         localProxyServer.state.lastXcodeAgentRequestModel = ""
@@ -718,6 +719,7 @@ final class AppViewModel: ObservableObject {
         appearancePreference = .system
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         liquidGlassEnabled = true
+        dockTileInteractiveEnabled = false
         defaultSettingsSection = .home
         visibleHomeDashboardSections = Set(HomeDashboardSection.allCases)
         resetMenuBarCustomization()
@@ -811,6 +813,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.didCompleteOnboardingDefaultsKey)
         defaults.removeObject(forKey: Self.telemetryOptInDefaultsKey)
         defaults.removeObject(forKey: Self.liquidGlassEnabledDefaultsKey)
+        defaults.removeObject(forKey: Self.dockTileInteractiveEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.inputOutputLoggingEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.inputOutputLoggingRecordInputsDefaultsKey)
         defaults.removeObject(forKey: Self.inputOutputLoggingRecordOutputsDefaultsKey)
@@ -906,6 +909,7 @@ final class AppViewModel: ObservableObject {
         showOnboardingWizard = true
         telemetryOptIn = false
         liquidGlassEnabled = true
+        dockTileInteractiveEnabled = false
         inputOutputLoggingEnabled = false
         inputOutputLoggingRecordInputs = false
         inputOutputLoggingRecordOutputs = false
@@ -1296,6 +1300,26 @@ final class AppViewModel: ObservableObject {
     @Published var liquidGlassEnabled: Bool = true {
         didSet {
             defaults.set(liquidGlassEnabled, forKey: Self.liquidGlassEnabledDefaultsKey)
+        }
+    }
+
+    /// The animated LED model marquee/activity ring on the Dock icon. Off by default —
+    /// unlike `liquidGlassEnabled`, enabling this changes system chrome outside the app
+    /// window, so it opts in rather than opts out.
+    @Published var dockTileInteractiveEnabled: Bool = false {
+        didSet {
+            defaults.set(dockTileInteractiveEnabled, forKey: Self.dockTileInteractiveEnabledDefaultsKey)
+        }
+    }
+
+    /// Use from Appearance settings instead of assigning `dockTileInteractiveEnabled` directly —
+    /// this is the only path that fires the PostHog enablement event, so loading a persisted
+    /// `true` value at launch doesn't re-fire it on every relaunch.
+    func setDockTileInteractiveEnabled(_ enabled: Bool) {
+        guard enabled != dockTileInteractiveEnabled else { return }
+        dockTileInteractiveEnabled = enabled
+        if enabled {
+            telemetryService.track(name: "dock_tile_interactive_enabled", telemetryOptIn: telemetryOptIn)
         }
     }
 
@@ -2566,6 +2590,7 @@ final class AppViewModel: ObservableObject {
 
         telemetryOptIn = defaults.bool(forKey: Self.telemetryOptInDefaultsKey)
         liquidGlassEnabled = defaults.object(forKey: Self.liquidGlassEnabledDefaultsKey) as? Bool ?? true
+        dockTileInteractiveEnabled = defaults.object(forKey: Self.dockTileInteractiveEnabledDefaultsKey) as? Bool ?? false
         inputOutputLoggingEnabled = defaults.bool(forKey: Self.inputOutputLoggingEnabledDefaultsKey)
         inputOutputLoggingRecordInputs = defaults.bool(forKey: Self.inputOutputLoggingRecordInputsDefaultsKey)
         inputOutputLoggingRecordOutputs = defaults.bool(forKey: Self.inputOutputLoggingRecordOutputsDefaultsKey)
@@ -2892,10 +2917,11 @@ final class AppViewModel: ObservableObject {
         }
 
         localProxyServer.reportCard.record(newSessionEvents.map(\.record))
-        localProxyServer.state.sessionRequestCount = localProxyServer.reportCard.totalRequests
-        if let lastModel = newSessionEvents.last(where: { !$0.record.model.isEmpty })?.record.model {
-            localProxyServer.state.lastModelSeen = lastModel
-        }
+        let lastModel = newSessionEvents.last(where: { !$0.record.model.isEmpty })?.record.model
+        localProxyServer.state.importCompletedRequests(
+            count: localProxyServer.reportCard.totalRequests,
+            lastModel: lastModel
+        )
     }
 
     func stopLogUpdates() {

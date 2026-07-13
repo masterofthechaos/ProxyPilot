@@ -1333,6 +1333,52 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
            body.localizedCaseInsensitiveContains("thought_signature") {
             return "Google direct rejected the tool-call continuation due to thought_signature validation. If this persists, use OpenRouter as the current workaround."
         }
-        return "Upstream returned status \(statusCode)"
+        let detail = upstreamErrorDetail(from: body)
+        guard !detail.isEmpty else {
+            return "Upstream returned status \(statusCode)"
+        }
+        return "Upstream returned status \(statusCode): \(detail)"
+    }
+
+    private func upstreamErrorDetail(from body: String) -> String {
+        let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        if let data = trimmed.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let message = nestedErrorMessage(in: json) {
+                return truncatedUpstreamErrorDetail(message)
+            }
+        }
+
+        return truncatedUpstreamErrorDetail(trimmed)
+    }
+
+    private func nestedErrorMessage(in json: [String: Any]) -> String? {
+        if let error = json["error"] as? [String: Any] {
+            for key in ["message", "detail", "code", "type"] {
+                if let value = error[key] as? String,
+                   !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return value
+                }
+            }
+        }
+
+        for key in ["message", "detail", "error"] {
+            if let value = json[key] as? String,
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func truncatedUpstreamErrorDetail(_ detail: String) -> String {
+        let cleaned = detail
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count > 600 else { return cleaned }
+        return String(cleaned.prefix(600)) + "..."
     }
 }

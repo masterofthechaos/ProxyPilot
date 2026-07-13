@@ -72,6 +72,73 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(relaunched.liquidGlassEnabled)
     }
 
+    func testDockTileInteractiveDefaultsOff() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertFalse(vm.dockTileInteractiveEnabled)
+    }
+
+    func testDockTileInteractivePreferencePersists() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+        vm?.setDockTileInteractiveEnabled(true)
+        vm = nil
+
+        let relaunched = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(relaunched.dockTileInteractiveEnabled)
+    }
+
+    func testSetDockTileInteractiveEnabledFiresPostHogEventOnlyOnEnableTransition() {
+        var capturedEvents: [(name: String, properties: [String: String])] = []
+        let telemetryService = TelemetryService(
+            defaults: defaults,
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+            postHogDeliveryEnabled: false,
+            protectedInternalMarkerURL: nil,
+            remoteCaptureHook: { name, properties in
+                capturedEvents.append((name: name, properties: properties))
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, telemetryService: telemetryService)
+        vm.telemetryOptIn = true
+
+        vm.setDockTileInteractiveEnabled(true)
+        XCTAssertEqual(capturedEvents.filter { $0.name == "dock_tile_interactive_enabled" }.count, 1)
+
+        // Re-enabling while already on, and disabling, must not fire the event again.
+        vm.setDockTileInteractiveEnabled(true)
+        vm.setDockTileInteractiveEnabled(false)
+        XCTAssertEqual(capturedEvents.filter { $0.name == "dock_tile_interactive_enabled" }.count, 1)
+    }
+
+    func testDockTileInteractiveEnabledLoadedFromDefaultsDoesNotFireTelemetry() {
+        defaults.set(true, forKey: "proxypilot.dockTileInteractiveEnabled")
+        var capturedEvents: [(name: String, properties: [String: String])] = []
+        let telemetryService = TelemetryService(
+            defaults: defaults,
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true),
+            postHogDeliveryEnabled: false,
+            protectedInternalMarkerURL: nil,
+            remoteCaptureHook: { name, properties in
+                capturedEvents.append((name: name, properties: properties))
+            }
+        )
+        let vm = AppViewModel(defaults: defaults, telemetryService: telemetryService)
+        vm.telemetryOptIn = true
+
+        XCTAssertTrue(vm.dockTileInteractiveEnabled)
+        XCTAssertFalse(capturedEvents.contains { $0.name == "dock_tile_interactive_enabled" })
+    }
+
+    func testResetToFreshInstallResetsDockTileInteractivePreference() async {
+        let vm = AppViewModel(defaults: defaults)
+        vm.setDockTileInteractiveEnabled(true)
+
+        await vm.resetToFreshInstall()
+
+        XCTAssertFalse(vm.dockTileInteractiveEnabled)
+    }
+
     func testPromptCachingModeDefaultsToAutoAndPersists() {
         var vm: AppViewModel? = AppViewModel(defaults: defaults)
 
@@ -697,6 +764,7 @@ final class AppViewModelTests: XCTestCase {
         vm.appearancePreference = .dark
         vm.proxyPilotAccentHex = "#FF2D55"
         vm.liquidGlassEnabled = false
+        vm.dockTileInteractiveEnabled = true
         vm.showMenuBarExtra = false
         vm.menuBarSectionOrder = [.quickActions, .statusDetails, .updates, .modelPicker, .sessionStats]
         vm.visibleMenuBarSections = [.statusDetails]
@@ -711,6 +779,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(vm.appearancePreference, .system)
         XCTAssertEqual(vm.proxyPilotAccentHex, ProxyPilotAccentColor.defaultHex)
         XCTAssertTrue(vm.liquidGlassEnabled)
+        XCTAssertFalse(vm.dockTileInteractiveEnabled)
         XCTAssertTrue(vm.showMenuBarExtra)
         XCTAssertEqual(vm.menuBarSectionOrder, MenuBarSection.defaultOrder)
         XCTAssertEqual(vm.visibleMenuBarSections, Set(MenuBarSection.defaultOrder))

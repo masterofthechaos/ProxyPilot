@@ -1,13 +1,51 @@
 import AppKit
+import Combine
 import SwiftUI
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let tooltipDelayMilliseconds = 1_000
-    var viewModel: AppViewModel?
+    private let dockTileController = ProxyPilotDockTileController()
+    private var dockTileInteractiveCancellable: AnyCancellable?
+    var viewModel: AppViewModel? {
+        didSet {
+            guard let viewModel else {
+                dockTileInteractiveCancellable = nil
+                return
+            }
+            dockTileController.bind(to: viewModel.localProxyState)
+            // The Dock Tile is opt-in (default off); install/restore tracks the
+            // Appearance settings toggle live, including its value at launch. Also
+            // re-syncs on `runInBackground` changes: switching activation policy
+            // (accessory ↔ regular) gives the app a new Dock tile representation,
+            // so a contentView set while accessory (no visible Dock icon) needs to
+            // be re-applied once a real Dock icon exists.
+            dockTileInteractiveCancellable = Publishers.CombineLatest(
+                viewModel.$dockTileInteractiveEnabled,
+                viewModel.$runInBackground
+            )
+            .receive(on: RunLoop.main)
+            .sink { [weak self] enabled, _ in
+                if enabled {
+                    self?.dockTileController.installIfEligible()
+                } else {
+                    self?.dockTileController.restoreDefaultIcon()
+                }
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // AppKit reads this app-domain default for native tooltips created by SwiftUI `.help`.
         UserDefaults.standard.set(Self.tooltipDelayMilliseconds, forKey: "NSInitialToolTipDelay")
+
+        // Install from the persisted preference immediately, since `viewModel` isn't
+        // assigned until the settings WindowGroup's onAppear runs (which may be later,
+        // or never if the window doesn't auto-open). The $dockTileInteractiveEnabled
+        // subscription above takes over for live toggling once viewModel is set.
+        if UserDefaults.standard.bool(forKey: AppViewModel.dockTileInteractiveEnabledDefaultsKey) {
+            dockTileController.installIfEligible()
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -32,6 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        dockTileController.restoreDefaultIcon()
         guard let viewModel else { return }
         Task { @MainActor in
             await viewModel.stopProxy()

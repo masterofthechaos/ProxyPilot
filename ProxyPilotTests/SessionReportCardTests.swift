@@ -191,7 +191,10 @@ final class SessionReportCardTests: XCTestCase {
             ))
         }
 
+        // Retained history is bounded for display/RAM, but the total request
+        // count must keep climbing past the window (regression: was pinned at 500).
         XCTAssertEqual(card.requests.count, 500)
+        XCTAssertEqual(card.totalRequests, 510)
         XCTAssertEqual(card.requests.first?.model, "model-10")
         XCTAssertEqual(card.sessionStartTime, Date(timeIntervalSince1970: 0))
     }
@@ -216,10 +219,57 @@ final class SessionReportCardTests: XCTestCase {
 
         XCTAssertEqual(publicationCount, 1)
         XCTAssertEqual(card.requests.count, 500)
+        XCTAssertEqual(card.totalRequests, 510)
         XCTAssertEqual(card.requests.first?.model, "model-10")
         XCTAssertEqual(card.requests.last?.model, "model-509")
         XCTAssertEqual(card.sessionStartTime, Date(timeIntervalSince1970: 0))
         withExtendedLifetime(cancellable) {}
+    }
+
+    /// Regression for the reported bug: a long session's displayed request count
+    /// silently froze at 500 (the retained-history window) because `totalRequests`
+    /// was derived from the bounded array's length. The total must be an unbounded
+    /// monotonic counter, decoupled from the retained display buffer.
+    func testTotalRequestCountKeepsClimbingPastRetainedWindow() {
+        let card = SessionReportCard()
+
+        // Climb well past the 500-entry retained-history window, mixing single
+        // and batch inserts the way the live GUI proxy does.
+        for index in 0..<500 {
+            card.record(.init(
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                model: "model-\(index)",
+                promptTokens: 1,
+                completionTokens: 1,
+                durationSeconds: 0.1,
+                path: "/v1/chat/completions",
+                wasStreaming: false
+            ))
+        }
+        XCTAssertEqual(card.totalRequests, 500)
+        XCTAssertEqual(card.requests.count, 500)
+
+        let batch = (500..<700).map { index in
+            ProxyPilotCore.RequestRecord(
+                timestamp: Date(timeIntervalSince1970: TimeInterval(index)),
+                model: "model-\(index)",
+                promptTokens: 1,
+                completionTokens: 1,
+                durationSeconds: 0.1,
+                path: "/v1/messages",
+                wasStreaming: true
+            )
+        }
+        card.record(batch)
+
+        // Total counts every request; retained history stays bounded for display.
+        XCTAssertEqual(card.totalRequests, 700)
+        XCTAssertEqual(card.requests.count, 500)
+
+        // Reset must zero the unbounded counter, not just the buffer.
+        card.reset()
+        XCTAssertEqual(card.totalRequests, 0)
+        XCTAssertEqual(card.requests.count, 0)
     }
 
     func testCacheAccountingAvailableIncludesWriteOnlyTelemetry() {
@@ -240,5 +290,20 @@ final class SessionReportCardTests: XCTestCase {
         XCTAssertEqual(card.totalPromptCacheMissTokens, 0)
         XCTAssertEqual(card.totalPromptCacheWriteTokens, 80)
         XCTAssertNil(card.cacheHitRate)
+    }
+
+    func testTokenAccountingAvailableIsFalseWhenProviderReturnsNoUsage() {
+        let card = SessionReportCard()
+        card.record(.init(
+            timestamp: Date(),
+            model: "qwen/qwen3.5-9b",
+            promptTokens: 0,
+            completionTokens: 0,
+            durationSeconds: 3.2,
+            path: "/v1/messages",
+            wasStreaming: true
+        ))
+
+        XCTAssertFalse(card.tokenAccountingAvailable)
     }
 }
