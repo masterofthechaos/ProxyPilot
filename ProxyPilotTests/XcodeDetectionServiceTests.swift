@@ -55,10 +55,7 @@ final class XcodeDetectionServiceTests: XCTestCase {
             configPath: "/Users/example/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig"
         )
 
-        let capability = XcodeDetectionService.agentModesCapability(
-            for: [installation],
-            macOSVersion: OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
-        )
+        let capability = XcodeDetectionService.agentModesCapability(for: [installation])
 
         XCTAssertTrue(capability.isClaudeAgentAvailable)
         XCTAssertTrue(capability.proxyPilotAgent.allowsAutomaticRegistration)

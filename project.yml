@@ -12,7 +12,7 @@ packages:
 settings:
   base:
     SWIFT_VERSION: 6.0
-    MARKETING_VERSION: "1.11.7"
+    MARKETING_VERSION: "1.11.8"
     CURRENT_PROJECT_VERSION: "40"
 targets:
   ProxyPilot-macOS:
