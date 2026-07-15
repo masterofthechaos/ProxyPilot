@@ -673,6 +673,54 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
+    @Test func contextCompactionEnabledFailsOpenForUnrecognizedSystemPrompt() async throws {
+        // The shipped v1 ruleset is empty, so even with ACCA enabled every
+        // system prompt is a fingerprint miss and must reach the upstream
+        // byte-identical (llama.cpp prefix-cache stability depends on it).
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: #"{"id":"chatcmpl-acca","model":"qwen3-coder","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}"#,
+            requireJSONRequest: true
+        )
+
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamProvider: .ollama,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)/v1",
+            requiresAuth: false,
+            preferredAnthropicUpstreamModel: "qwen3-coder",
+            promptCaching: PromptCachingConfiguration(isEnabled: false, mode: .off),
+            contextCompaction: .enabled
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        let originalSystem = String(repeating: "You are a very verbose coding agent. ", count: 800)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "claude-sonnet-4-5-20250514",
+            "max_tokens": 64,
+            "system": originalSystem,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+        let capturedRequest = try #require(stub.requests().first)
+        let capturedBody = try #require(capturedRequest.body.data(using: .utf8))
+        let json = try #require(JSONSerialization.jsonObject(with: capturedBody) as? [String: Any])
+        let messages = try #require(json["messages"] as? [[String: Any]])
+        #expect(messages[0]["role"] as? String == "system")
+        #expect(messages[0]["content"] as? String == originalSystem)
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
     @Test func xAIComputeCacheHintsReachUpstreamHeader() async throws {
         let stub = StubUpstream()
         let upstreamPort = try await stub.start(

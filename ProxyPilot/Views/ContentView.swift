@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var highlightedProxySection: ProxySectionFocus?
     @State private var proxyFocusRequestID: Int = 0
     @State private var windowWidth: CGFloat = 0
+    @AppStorage("proxypilot.layoutModePreference") private var layoutModePreference: LayoutModePreference = .automatic
     @State private var modelSearchText = ""
     @State private var modelProviderFilter = ""
     @State private var modelTierFilter = PricingTier.unknown
@@ -79,7 +80,7 @@ struct ContentView: View {
         Group {
             if usesNarrowStandaloneLayout {
                 detailShell
-                    .navigationTitle("\(settingsWindowTitle) - \(selectedSection.title)")
+                    .navigationTitle(selectedSection.title)
                     .toolbar {
                         settingsToolbar
                     }
@@ -157,7 +158,7 @@ struct ContentView: View {
             Divider()
 
             detailShell
-                .navigationTitle(settingsWindowTitle)
+                .navigationTitle("")
                 .toolbar {
                     settingsToolbar
                 }
@@ -165,12 +166,15 @@ struct ContentView: View {
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var settingsWindowTitle: String {
-        AppBuildBadge.currentAppDisplayName
-    }
-
     private var usesNarrowStandaloneLayout: Bool {
-        windowWidth > 0 && windowWidth < 760
+        switch layoutModePreference {
+        case .automatic:
+            return windowWidth > 0 && windowWidth < 760
+        case .sidebar:
+            return false
+        case .compact:
+            return true
+        }
     }
 
     private var usesCollapsedTopNavigation: Bool {
@@ -193,6 +197,7 @@ struct ContentView: View {
                 .zIndex(0)
         }
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .proxyPilotAmbientBackground()
     }
 
     private var collapsedSectionTabs: some View {
@@ -308,6 +313,17 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var settingsToolbar: some ToolbarContent {
+        if #available(macOS 26.0, *) {
+            ToolbarItem(placement: .navigation) {
+                ProxyPilotBrandMark()
+            }
+            .sharedBackgroundVisibility(.hidden)
+        } else {
+            ToolbarItem(placement: .navigation) {
+                ProxyPilotBrandMark()
+            }
+        }
+
         if vm.shouldShowToolbarStatus {
             ToolbarItem(placement: .navigation) {
                 StatusToolbarLabel(isRunning: vm.isRunning, statusText: vm.statusText)
@@ -353,6 +369,24 @@ struct ContentView: View {
                 Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
             }
             .help(AppViewModel.refreshProxyStatusHelpText)
+        }
+
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Menu {
+                Picker("Layout", selection: $layoutModePreference) {
+                    ForEach(LayoutModePreference.allCases) { mode in
+                        Label(mode.title, systemImage: mode.systemImage).tag(mode)
+                    }
+                }
+                .pickerStyle(.inline)
+            } label: {
+                Label("Layout", systemImage: layoutModePreference.systemImage)
+            }
+            .help("Choose ProxyPilot's window layout")
         }
 
         if #available(macOS 26.0, *) {
@@ -550,6 +584,13 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             .id(ProxySectionFocus.cacheSignals)
+
+            // Hidden until the shipped ACCA ruleset provides MVP functionality —
+            // an empty ruleset makes the toggle a no-op, and no-op controls
+            // must not reach users. See ContextCompactionFeatureGate.
+            if ContextCompactionFeatureGate.isAvailable {
+                ContextCompactionSettingsView()
+            }
 
             Section("Preflight") {
                 Button {

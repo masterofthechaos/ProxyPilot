@@ -397,12 +397,31 @@ public actor InputOutputLogStore {
     }
 
     public func pruneExpired(now: Date = Date(), includeUntilQuit: Bool = false) throws {
-        let records = try readRecords().filter { record in
+        let records = try readDecodableRecords().filter { record in
             if includeUntilQuit, record.deleteOnQuit { return false }
             guard let expiresAt = record.retentionExpiresAt else { return true }
             return expiresAt > now
         }
         try rewrite(records)
+    }
+
+    /// Lenient reader used by pruning: a line that cannot be decrypted or decoded
+    /// (partial write, key rotation) is dropped instead of failing the whole pass.
+    /// A single corrupt line must never permanently block new records from saving.
+    private func readDecodableRecords() throws -> [InputOutputLogRecord] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+
+        let data = try Data(contentsOf: url)
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                guard let decrypted = try? decrypt(String(line)) else { return nil }
+                return try? decoder.decode(InputOutputLogRecord.self, from: decrypted)
+            }
     }
 
     public func reset() throws {
@@ -632,8 +651,35 @@ public struct InputOutputLoggingRecorder: Sendable {
         )
 
         guard record.input != nil || record.output != nil else { return }
-        try await logStore.pruneExpired()
+        // Pruning rewrites the whole encrypted store, which grows large under the
+        // 7/30-day retention windows — throttle it off the per-request hot path,
+        // and never let a prune failure block the append.
+        if Self.pruneThrottle.shouldPrune(storePath: logStore.url.path) {
+            try? await logStore.pruneExpired()
+        }
         try await logStore.append(record)
+    }
+
+    private static let pruneThrottle = PruneThrottle()
+
+    final class PruneThrottle: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lastPruneByPath: [String: Date] = [:]
+        private let minimumInterval: TimeInterval
+
+        init(minimumInterval: TimeInterval = 5 * 60) {
+            self.minimumInterval = minimumInterval
+        }
+
+        func shouldPrune(storePath: String, now: Date = Date()) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if let last = lastPruneByPath[storePath], now.timeIntervalSince(last) < minimumInterval {
+                return false
+            }
+            lastPruneByPath[storePath] = now
+            return true
+        }
     }
 
     public func readRecords() async throws -> [InputOutputLogRecord] {

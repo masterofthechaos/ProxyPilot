@@ -83,6 +83,97 @@ final class InputOutputLoggingStoreTests: XCTestCase {
         XCTAssertEqual(remaining.map(\.id), [withinWindow.id])
     }
 
+    func testPruneExpiredDropsCorruptLinesInsteadOfThrowing() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let logURL = directory.appendingPathComponent("records.jsonl.enc")
+        let store = InputOutputLogStore(
+            url: logURL,
+            encryptionKey: Data(repeating: 3, count: 32)
+        )
+
+        let now = Date(timeIntervalSince1970: 1_714_000_000)
+        let valid = InputOutputLogRecord(
+            timestamp: now,
+            source: "gui",
+            path: "/v1/messages",
+            model: "glm-5",
+            provider: "zai",
+            wasStreaming: false,
+            statusCode: 200,
+            retentionExpiresAt: InputOutputLoggingRetention.thirtyDays.expirationDate(from: now),
+            input: .utf8("prompt"),
+            output: nil
+        )
+        try await store.append(valid)
+
+        // Simulate a partial write / key-rotation remnant: a line that cannot decrypt.
+        let handle = try FileHandle(forWritingTo: logURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("not-a-valid-encrypted-line\n".utf8))
+        try handle.close()
+
+        // Prune must not throw, must keep the valid record, and must drop the corrupt line.
+        try await store.pruneExpired(now: now)
+        let remaining = try await store.readRecords()
+        XCTAssertEqual(remaining.map(\.id), [valid.id])
+
+        // New appends keep working after the corrupt line is cleaned up.
+        try await store.append(valid)
+        let afterAppend = try await store.readRecords()
+        XCTAssertEqual(afterAppend.count, 2)
+    }
+
+    func testRecorderSavesNewRecordsUnderThirtyDayRetentionDespiteCorruptStoreLine() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let preferencesURL = directory.appendingPathComponent("settings.json")
+        let logURL = directory.appendingPathComponent("records.jsonl.enc")
+        let preferencesStore = InputOutputLoggingPreferencesStore(url: preferencesURL)
+        try preferencesStore.save(InputOutputLoggingPreferences(
+            enabled: true,
+            recordInputs: true,
+            recordOutputs: true,
+            cliEnabled: false,
+            retention: .thirtyDays,
+            externalStorageEnabled: false
+        ))
+
+        // Pre-seed the store with a line the recorder cannot decrypt.
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("corrupt-line\n".utf8).write(to: logURL)
+
+        let recorder = InputOutputLoggingRecorder(
+            source: "gui",
+            preferencesStore: preferencesStore,
+            logStore: InputOutputLogStore(
+                url: logURL,
+                encryptionKey: Data(repeating: 6, count: 32)
+            )
+        )
+        let now = Date(timeIntervalSince1970: 1_714_000_000)
+
+        try await recorder.record(
+            path: "/v1/messages",
+            model: "glm-5",
+            provider: "zai",
+            wasStreaming: false,
+            statusCode: 200,
+            startedAt: now,
+            inputBody: Data("thirty-day prompt".utf8),
+            outputBody: Data("thirty-day output".utf8)
+        )
+
+        let jsonl = try await recorder.exportJSONL(now: now)
+        XCTAssertTrue(jsonl.contains("thirty-day prompt"))
+        let records = try await recorder.readRecords()
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(
+            records[0].retentionExpiresAt,
+            InputOutputLoggingRetention.thirtyDays.expirationDate(from: now)
+        )
+    }
+
     func testOutputTruncatedFlagRoundTripsThroughEncryptedStore() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)

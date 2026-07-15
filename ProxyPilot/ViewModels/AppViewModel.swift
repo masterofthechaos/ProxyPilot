@@ -69,6 +69,7 @@ final class AppViewModel: ObservableObject {
     private static let inputOutputLoggingExternalStorageDefaultsKey = "proxypilot.inputOutputLogging.externalStorage"
     private static let inputOutputLoggingExternalStoragePathDefaultsKey = "proxypilot.inputOutputLogging.externalStoragePath"
     private static let promptCachingModeDefaultsKey = "proxypilot.promptCaching.mode"
+    private static let contextCompactionEnabledDefaultsKey = "proxypilot.contextCompaction.enabled"
     static let appearancePreferenceDefaultsKey = "proxypilot.customization.appearance"
     static let proxyPilotAccentHexDefaultsKey = "proxypilot.customization.accentHex"
     static let showMenuBarExtraDefaultsKey = "proxypilot.customization.showMenuBarExtra"
@@ -822,6 +823,7 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: Self.inputOutputLoggingExternalStorageDefaultsKey)
         defaults.removeObject(forKey: Self.inputOutputLoggingExternalStoragePathDefaultsKey)
         defaults.removeObject(forKey: Self.promptCachingModeDefaultsKey)
+        defaults.removeObject(forKey: Self.contextCompactionEnabledDefaultsKey)
         defaults.removeObject(forKey: Self.appearancePreferenceDefaultsKey)
         defaults.removeObject(forKey: Self.proxyPilotAccentHexDefaultsKey)
         defaults.removeObject(forKey: Self.showMenuBarExtraDefaultsKey)
@@ -918,6 +920,7 @@ final class AppViewModel: ObservableObject {
         inputOutputLoggingExternalStorageEnabled = false
         inputOutputLoggingExternalStoragePath = nil
         promptCachingMode = .computeCacheHints
+        contextCompactionEnabled = false
         appearancePreference = .system
         proxyPilotAccentHex = ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = true
@@ -1389,6 +1392,22 @@ final class AppViewModel: ObservableObject {
             defaults.set(promptCachingMode.rawValue, forKey: Self.promptCachingModeDefaultsKey)
             persistAgentLaunchSettings()
         }
+    }
+
+    @Published var contextCompactionEnabled: Bool = false {
+        didSet {
+            defaults.set(contextCompactionEnabled, forKey: Self.contextCompactionEnabledDefaultsKey)
+            persistAgentLaunchSettings()
+        }
+    }
+
+    var contextCompactionConfiguration: ContextCompactionConfiguration {
+        // Feature-gated until the production ruleset ships MVP functionality;
+        // the persisted preference is kept intact so an early opt-in survives
+        // the gate opening.
+        ContextCompactionConfiguration(
+            isEnabled: contextCompactionEnabled && ContextCompactionFeatureGate.isAvailable
+        )
     }
 
     var promptCachingConfiguration: PromptCachingConfiguration {
@@ -2603,6 +2622,7 @@ final class AppViewModel: ObservableObject {
         promptCachingMode = PromptCachingMode(
             rawValue: defaults.string(forKey: Self.promptCachingModeDefaultsKey) ?? ""
         ) ?? .computeCacheHints
+        contextCompactionEnabled = defaults.bool(forKey: Self.contextCompactionEnabledDefaultsKey)
         selectedAgentMode = AgentMode(
             rawValue: defaults.string(forKey: Self.selectedAgentModeDefaultsKey) ?? ""
         ) ?? .claudeAgent
@@ -4121,13 +4141,17 @@ final class AppViewModel: ObservableObject {
         let upstreamBase = proxyService.normalizedUpstreamAPIBase(from: upstreamAPIBaseURLString) ?? defaultUpstreamBase
 
         let sessionID = UUID().uuidString
-        let inputOutputLogger = inputOutputLoggingPreferencesStore.flatMap { preferencesStore in
-            try? InputOutputLoggingRecorder.productionIfConfigured(
-                source: "gui",
-                sessionID: sessionID,
-                preferencesStore: preferencesStore
-            )
-        }
+        let inputOutputLoggerProvider: (@Sendable () -> InputOutputLoggingRecorder?)? =
+            inputOutputLoggingPreferencesStore.map { preferencesStore in
+                let cache = InputOutputLoggerSessionCache()
+                return {
+                    cache.recorder(
+                        source: "gui",
+                        sessionID: sessionID,
+                        preferencesStore: preferencesStore
+                    )
+                }
+            }
         let config = LocalProxyServer.Config(
             host: proxy.host,
             port: port,
@@ -4144,8 +4168,9 @@ final class AppViewModel: ObservableObject {
                 ? preferredXcodeAgentModel(from: savedDefaultModels)
                 : preferredModel,
             googleThoughtSignatureStore: provider == .google ? GoogleThoughtSignatureStore() : nil,
-            inputOutputLogger: inputOutputLogger,
-            promptCaching: selectedPromptCachingConfiguration
+            inputOutputLoggerProvider: inputOutputLoggerProvider,
+            promptCaching: selectedPromptCachingConfiguration,
+            contextCompaction: contextCompactionConfiguration
         )
 
         if upstreamKey == nil && selectedUpstreamRequiresAPIKey {
@@ -4759,7 +4784,8 @@ final class AppViewModel: ObservableObject {
             providerID: hasActiveCustomProvider ? UpstreamProvider.openAI.rawValue : upstreamProvider.rawValue,
             upstreamURL: upstreamAPIBaseURLString,
             credentialKey: activeCustomProvider?.keychainAccountName,
-            promptCachingMode: cacheMode
+            promptCachingMode: cacheMode,
+            contextCompactionEnabled: contextCompactionEnabled
         )
         try? settings.save()
     }

@@ -4,7 +4,6 @@ import ProxyPilotCore
 #if os(macOS)
 enum AgentCommandSupport {
     static func capability() -> AgentModesCapabilityPolicy.Evaluation {
-        let os = ProcessInfo.processInfo.operatingSystemVersion
         let xcodes: [AgentModesCapabilityPolicy.Xcode]
         if let installation = XcodeBuildDetector.detectSelectedInstallation() {
             xcodes = [.init(
@@ -15,14 +14,7 @@ enum AgentCommandSupport {
         } else {
             xcodes = []
         }
-        return AgentModesCapabilityPolicy.evaluate(
-            macOSVersion: .init(
-                major: os.majorVersion,
-                minor: os.minorVersion,
-                patch: os.patchVersion
-            ),
-            xcodes: xcodes
-        )
+        return AgentModesCapabilityPolicy.evaluate(xcodes: xcodes)
     }
 
     static func helperSources() -> (launcher: URL, cli: URL)? {

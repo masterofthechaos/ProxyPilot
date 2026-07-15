@@ -30,15 +30,9 @@ final class XcodeDetectionService: Sendable {
     }
 
     static func agentModesCapability(
-        for installations: [XcodeInstallation],
-        macOSVersion: OperatingSystemVersion = ProcessInfo.processInfo.operatingSystemVersion
+        for installations: [XcodeInstallation]
     ) -> AgentModesCapabilityPolicy.Evaluation {
         AgentModesCapabilityPolicy.evaluate(
-            macOSVersion: .init(
-                major: macOSVersion.majorVersion,
-                minor: macOSVersion.minorVersion,
-                patch: macOSVersion.patchVersion
-            ),
             xcodes: installations.map {
                 .init(id: $0.id, version: $0.version, build: $0.buildNumber)
             }

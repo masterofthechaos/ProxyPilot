@@ -19,6 +19,7 @@ public struct ProxyConfiguration: Sendable {
     public let googleThoughtSignatureStore: GoogleThoughtSignatureStore?
     public let inputOutputLogger: InputOutputLoggingRecorder?
     public let promptCaching: PromptCachingConfiguration
+    public let contextCompaction: ContextCompactionConfiguration
     public let sessionID: String
 
     public init(
@@ -38,6 +39,7 @@ public struct ProxyConfiguration: Sendable {
         googleThoughtSignatureStore: GoogleThoughtSignatureStore? = nil,
         inputOutputLogger: InputOutputLoggingRecorder? = nil,
         promptCaching: PromptCachingConfiguration = .default,
+        contextCompaction: ContextCompactionConfiguration = .disabled,
         sessionID: String = UUID().uuidString
     ) {
         self.host = host
@@ -56,6 +58,7 @@ public struct ProxyConfiguration: Sendable {
         self.googleThoughtSignatureStore = googleThoughtSignatureStore
         self.inputOutputLogger = inputOutputLogger
         self.promptCaching = promptCaching
+        self.contextCompaction = contextCompaction
         self.sessionID = sessionID
     }
 

@@ -3,7 +3,6 @@ import Foundation
 /// The shared product policy for Claude Agent and ProxyPilot Agent availability.
 public enum AgentModesCapabilityPolicy {
     public static let minimumClaudeAgentVersion = Version(major: 26, minor: 3)
-    public static let minimumProxyPilotAgentMacOSVersion = Version(major: 27)
     public static let minimumProxyPilotAgentXcodeVersion = Version(major: 27)
     public static let provenAutomaticRegistrationBuilds: Set<String> = ["27A5194q"]
 
@@ -53,7 +52,6 @@ public enum AgentModesCapabilityPolicy {
     }
 
     public enum HiddenReason: Equatable, Sendable {
-        case macOSVersionTooOld(detected: Version, required: Version)
         case xcodeNotFound
         case xcodeVersionTooOld(detected: Version?, required: Version)
     }
@@ -92,8 +90,12 @@ public enum AgentModesCapabilityPolicy {
         }
     }
 
+    /// Evaluates ProxyPilot Agent availability from the installed Xcodes alone.
+    ///
+    /// Availability is gated on the Xcode major version (Agent Modes is an Xcode
+    /// feature), not on the host macOS version — Xcode 27 betas run on the prior
+    /// macOS, and those users should still see the ProxyPilot Agent controls.
     public static func evaluate(
-        macOSVersion: Version,
         xcodes: [Xcode],
         provenBuilds: Set<String> = provenAutomaticRegistrationBuilds
     ) -> Evaluation {
@@ -101,16 +103,6 @@ public enum AgentModesCapabilityPolicy {
         let claudeAgentXcode = orderedXcodes.first {
             guard let version = $0.version else { return false }
             return version >= minimumClaudeAgentVersion
-        }
-
-        guard macOSVersion >= minimumProxyPilotAgentMacOSVersion else {
-            return Evaluation(
-                claudeAgentXcode: claudeAgentXcode,
-                proxyPilotAgent: .hidden(.macOSVersionTooOld(
-                    detected: macOSVersion,
-                    required: minimumProxyPilotAgentMacOSVersion
-                ))
-            )
         }
 
         guard !orderedXcodes.isEmpty else {

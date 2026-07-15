@@ -34,6 +34,9 @@ struct StartCommand: AsyncParsableCommand {
     @Option(name: .long, help: "Prompt caching mode: auto, observe-only, or off.")
     var promptCaching: CLIPromptCachingMode = .auto
 
+    @Option(name: .long, help: "Context compaction (Beta) for local providers: auto, on, or off. Auto follows the shared GUI/CLI setting.")
+    var contextCompaction: CLIContextCompactionMode = .auto
+
     @Flag(name: .long, help: "Emit JSON output.")
     var json: Bool = false
 
@@ -82,6 +85,7 @@ struct StartCommand: AsyncParsableCommand {
                     key: inlineKey,
                     model: model,
                     promptCaching: promptCaching,
+                    contextCompaction: contextCompaction,
                     json: json
                 )
             } catch {
@@ -155,7 +159,8 @@ struct StartCommand: AsyncParsableCommand {
             sessionStats: sessionStats,
             googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,
             inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "cli", sessionID: sessionID),
-            promptCaching: promptCaching.configuration
+            promptCaching: promptCaching.configuration,
+            contextCompaction: contextCompaction.configuration()
         )
 
         let server = NIOProxyServer()

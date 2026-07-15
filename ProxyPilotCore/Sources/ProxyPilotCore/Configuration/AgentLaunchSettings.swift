@@ -39,6 +39,11 @@ public struct AgentLaunchSettings: Codable, Equatable, Sendable {
     /// The credential itself is never written to this file.
     public var credentialKey: String?
     public var promptCachingMode: PromptCachingMode
+    /// Whether Active Context Compaction is enabled. Added as an optional
+    /// key without a schema bump: older readers ignore unknown keys, and a
+    /// schema bump would make them reject the whole file (`resolve()`
+    /// requires `schema <= currentSchema`).
+    public var contextCompactionEnabled: Bool
 
     public static let currentSchema = 3
 
@@ -50,7 +55,8 @@ public struct AgentLaunchSettings: Codable, Equatable, Sendable {
         providerID: String? = nil,
         upstreamURL: String? = nil,
         credentialKey: String? = nil,
-        promptCachingMode: PromptCachingMode = .auto
+        promptCachingMode: PromptCachingMode = .auto,
+        contextCompactionEnabled: Bool = false
     ) {
         self.schema = schema
         self.port = port
@@ -60,11 +66,13 @@ public struct AgentLaunchSettings: Codable, Equatable, Sendable {
         self.upstreamURL = upstreamURL
         self.credentialKey = credentialKey
         self.promptCachingMode = promptCachingMode
+        self.contextCompactionEnabled = contextCompactionEnabled
     }
 
     private enum CodingKeys: String, CodingKey {
         case schema, port, modelID, upstreamLabel, providerID, upstreamURL, credentialKey
         case promptCachingMode
+        case contextCompactionEnabled
     }
 
     public init(from decoder: any Decoder) throws {
@@ -80,6 +88,10 @@ public struct AgentLaunchSettings: Codable, Equatable, Sendable {
             PromptCachingMode.self,
             forKey: .promptCachingMode
         ) ?? .auto
+        contextCompactionEnabled = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .contextCompactionEnabled
+        ) ?? false
     }
 
     // MARK: - Storage location

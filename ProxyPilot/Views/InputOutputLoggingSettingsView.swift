@@ -31,7 +31,7 @@ struct InputOutputLoggingSettingsView: View {
 
                 helperText("By default, ProxyPilot does not save or record the content of your inputs or outputs, even in diagnostic files. Recording may improve debugging, but can increase overhead during long sessions and pose privacy risks.")
 
-                helperText("**Recorded prompts and outputs are encrypted while stored by ProxyPilot and are deleted after a maximum of 24 hours.** You can export them manually if you wish to keep them longer than that. ProxyPilot never includes any prompt data in diagnostic telemetry.", markdown: true)
+                helperText("**Recorded prompts and outputs are encrypted while stored by ProxyPilot and are deleted after your selected retention window — 24 hours by default, up to 30 days.** You can export them manually if you wish to keep them longer than that. ProxyPilot never includes any prompt data in diagnostic telemetry.", markdown: true)
 
                 if vm.inputOutputLoggingEnabled {
                     DisclosureGroup(isExpanded: $settingsExpanded) {
@@ -294,7 +294,7 @@ struct InputOutputLoggingSettingsView: View {
             .padding(.bottom, 2)
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Enabling Input & Output Recording will save the full content of your prompts and/or LLM outputs. These may contain your proprietary code or sensitive information.\n\nBy default, ProxyPilot will securely store inputs and outputs, deleting after 24 hours.")
+                Text("Enabling Input & Output Recording will save the full content of your prompts and/or LLM outputs. These may contain your proprietary code or sensitive information.\n\n\(vm.inputOutputLoggingRetention.helperText) You can change the retention window (up to 30 days) in Logging settings.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

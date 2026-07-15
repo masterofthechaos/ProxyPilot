@@ -8,10 +8,52 @@
         }
       }
     },
+    "Active Context Compaction" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "主动上下文压缩" }
+        }
+      }
+    },
     "Advanced" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : { "state" : "translated", "value" : "高级" }
+        }
+      }
+    },
+    "**Applies only to local providers (Ollama, LM Studio).** Your own messages and tool definitions are never modified, and unrecognized instructions are always forwarded unchanged. Takes effect the next time the proxy starts." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "**仅适用于本地提供商（Ollama、LM Studio）。**您自己的消息和工具定义绝不会被修改，无法识别的指令始终原样转发。将在下次启动代理时生效。" }
+        }
+      }
+    },
+    "Enable Active Context Compaction" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "启用主动上下文压缩" }
+        }
+      }
+    },
+    "Last request:" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "最近请求：" }
+        }
+      }
+    },
+    "Not active for" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "不适用于" }
+        }
+      }
+    },
+    "When ACCA is enabled, ProxyPilot attempts to shrink context bloat from the Xcode agent by passing a condensed version of Xcode's context instructions to the upstream model. This may improve time-to-first-token and latency for local inference." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : { "state" : "translated", "value" : "启用 ACCA 后，ProxyPilot 会尝试将 Xcode 代理的上下文指令压缩为精简版本再传递给上游模型，从而减少上下文膨胀。这可能会改善本地推理的首个令牌时间（TTFT）和延迟。" }
         }
       }
     },

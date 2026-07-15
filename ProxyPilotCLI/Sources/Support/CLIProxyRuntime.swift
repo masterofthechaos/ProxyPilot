@@ -153,6 +153,7 @@ enum CLIProxyRuntime {
         key: String?,
         model: String?,
         promptCaching: CLIPromptCachingMode,
+        contextCompaction: CLIContextCompactionMode = .auto,
         json: Bool
     ) async throws -> DaemonLaunchResult {
         let probeBefore = await probeProxy(on: port)
@@ -164,6 +165,7 @@ enum CLIProxyRuntime {
             key: key,
             model: model,
             promptCaching: promptCaching,
+            contextCompaction: contextCompaction,
             json: json
         )
         let args = spawnConfiguration.arguments
@@ -321,6 +323,7 @@ enum CLIProxyRuntime {
         key: String?,
         model: String?,
         promptCaching: CLIPromptCachingMode,
+        contextCompaction: CLIContextCompactionMode = .auto,
         json: Bool
     ) -> DaemonSpawnConfiguration {
         var args = ["proxypilot", "start", "--port", "\(port)", "--provider", provider]
@@ -334,6 +337,7 @@ enum CLIProxyRuntime {
             args += ["--model", model]
         }
         args += ["--prompt-caching", promptCaching.rawValue]
+        args += ["--context-compaction", contextCompaction.rawValue]
         if json {
             args += ["--json"]
         }

@@ -83,6 +83,36 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     }
 }
 
+enum LayoutModePreference: String, CaseIterable, Identifiable, Hashable {
+    case automatic
+    case sidebar
+    case compact
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .automatic:
+            return "Automatic"
+        case .sidebar:
+            return "Sidebar"
+        case .compact:
+            return "Compact"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .automatic:
+            return "rectangle.3.group"
+        case .sidebar:
+            return "sidebar.left"
+        case .compact:
+            return "rectangle.grid.1x2"
+        }
+    }
+}
+
 enum ProxySectionFocus: String, Identifiable, Hashable {
     case cacheSignals
     case models

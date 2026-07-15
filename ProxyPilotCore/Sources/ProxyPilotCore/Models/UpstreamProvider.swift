@@ -226,6 +226,18 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
     /// Whether this provider requires an API key for authentication.
     public var requiresAPIKey: Bool { !isLocal }
 
+    /// Whether Active Context Compaction may rewrite the Xcode agent's
+    /// system instructions for this provider. Narrower than `isLocal`:
+    /// 9Router and GitHub Copilot are local helpers that forward to cloud
+    /// inference, where prefill is cheap and the original prompt should
+    /// survive intact. Only true local-inference runtimes qualify.
+    public var supportsContextCompaction: Bool {
+        switch self {
+        case .ollama, .lmStudio: return true
+        default: return false
+        }
+    }
+
     public var secretKey: String? {
         switch self {
         case .zAI:        return SecretKey.zaiAPIKey

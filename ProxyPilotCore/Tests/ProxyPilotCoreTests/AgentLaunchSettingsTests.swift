@@ -110,6 +110,38 @@ private func temporaryFileURL() -> URL {
     #expect(settings.promptCachingMode == .auto)
 }
 
+@Test func contextCompactionEnabledRoundTrips() throws {
+    let url = temporaryFileURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+    let written = AgentLaunchSettings(port: 4322, contextCompactionEnabled: true)
+    try written.save(to: url)
+
+    let read = AgentLaunchSettings.resolve(from: url)
+    #expect(read.contextCompactionEnabled)
+    #expect(read == written)
+}
+
+@Test func legacyFileWithoutContextCompactionKeyDecodesToDisabled() throws {
+    let url = temporaryFileURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let legacy: [String: Any] = ["schema": 3, "port": 4100, "promptCachingMode": "auto"]
+    try JSONSerialization.data(withJSONObject: legacy).write(to: url)
+
+    let settings = AgentLaunchSettings.resolve(from: url)
+    #expect(settings.port == 4100)
+    #expect(!settings.contextCompactionEnabled)
+}
+
+@Test func contextCompactionFieldDidNotBumpSchema() {
+    // Bumping the schema would make older launcher binaries reject the
+    // whole file (resolve() requires schema <= currentSchema). The field
+    // is optional-decoded instead.
+    #expect(AgentLaunchSettings.currentSchema == 3)
+}
+
 @Test func storageURLHonorsXDGConfigHome() {
     let url = AgentLaunchSettings.storageURL(environment: ["XDG_CONFIG_HOME": "/tmp/xdg-test"])
     #expect(url.path == "/tmp/xdg-test/proxypilot/current-selection.json")

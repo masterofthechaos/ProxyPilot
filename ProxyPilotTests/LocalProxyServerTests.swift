@@ -1490,4 +1490,11 @@ final class LocalProxyServerTests: XCTestCase {
         )
         XCTAssertNil(status)
     }
+
+    func testFormatByteCountUsesCompactUnits() {
+        XCTAssertEqual(LocalProxyServerHelpers.formatByteCount(0), "0 B")
+        XCTAssertEqual(LocalProxyServerHelpers.formatByteCount(312), "312 B")
+        XCTAssertEqual(LocalProxyServerHelpers.formatByteCount(121_242), "118.4 KB")
+        XCTAssertEqual(LocalProxyServerHelpers.formatByteCount(3 * 1024 * 1024), "3.0 MB")
+    }
 }

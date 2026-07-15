@@ -7,6 +7,14 @@ enum AnthropicTranslatorMode: String, Sendable {
     case legacyFallback
 }
 
+/// Snapshot of the most recent Active Context Compaction application,
+/// published for the settings UI stats line.
+struct ContextCompactionStat: Equatable, Sendable {
+    let originalBytes: Int
+    let compactedBytes: Int
+    let date: Date
+}
+
 @MainActor
 final class LocalProxyState: ObservableObject {
     nonisolated init() {}
@@ -23,6 +31,7 @@ final class LocalProxyState: ObservableObject {
     @Published var lastXcodeAgentRequestModel: String = ""
     @Published var lastXcodeAgentRequestStatus: Int?
     @Published var lastXcodeAgentRequestAt: Date?
+    @Published var lastContextCompaction: ContextCompactionStat?
 
     private var activeRequestIDs: Set<UUID> = []
     private var activeRequestModels: [UUID: String] = [:]
@@ -35,6 +44,7 @@ final class LocalProxyState: ObservableObject {
         activeRequestModels.removeAll()
         activeModels.removeAll()
         lastFailureAt = nil
+        lastContextCompaction = nil
     }
 
     func beginRequest(id: UUID, modelName: String?) {
@@ -105,6 +115,32 @@ final class LocalProxyState: ObservableObject {
     }
 }
 
+/// Memoizes the session's `InputOutputLoggingRecorder` so every request shares
+/// one underlying store actor (serialized appends) while still resolving
+/// lazily: if logging is disabled when the proxy starts, each request re-checks
+/// the shared preferences until logging becomes effective, then caches the
+/// recorder for the rest of the session.
+final class InputOutputLoggerSessionCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cached: InputOutputLoggingRecorder?
+
+    func recorder(
+        source: String,
+        sessionID: String,
+        preferencesStore: InputOutputLoggingPreferencesStore
+    ) -> InputOutputLoggingRecorder? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached { return cached }
+        cached = try? InputOutputLoggingRecorder.productionIfConfigured(
+            source: source,
+            sessionID: sessionID,
+            preferencesStore: preferencesStore
+        )
+        return cached
+    }
+}
+
 final class LocalProxyServer: @unchecked Sendable {
     enum ServerError: LocalizedError {
         case alreadyRunning
@@ -137,8 +173,13 @@ final class LocalProxyServer: @unchecked Sendable {
         let miniMaxRoutingMode: MiniMaxRoutingMode
         let preferredAnthropicUpstreamModel: String
         let googleThoughtSignatureStore: GoogleThoughtSignatureStore?
-        let inputOutputLogger: InputOutputLoggingRecorder?
+        /// Resolved on every request so logging preferences changed while the
+        /// proxy is running (enable/disable, retention, CLI scope) take effect
+        /// live instead of being frozen at proxy start.
+        let inputOutputLoggerProvider: (@Sendable () -> InputOutputLoggingRecorder?)?
+        var inputOutputLogger: InputOutputLoggingRecorder? { inputOutputLoggerProvider?() }
         var promptCaching: PromptCachingConfiguration = .default
+        var contextCompaction: ContextCompactionConfiguration = .disabled
 
         init(
             host: String,
@@ -154,8 +195,9 @@ final class LocalProxyServer: @unchecked Sendable {
             miniMaxRoutingMode: MiniMaxRoutingMode,
             preferredAnthropicUpstreamModel: String,
             googleThoughtSignatureStore: GoogleThoughtSignatureStore?,
-            inputOutputLogger: InputOutputLoggingRecorder? = nil,
-            promptCaching: PromptCachingConfiguration = .default
+            inputOutputLoggerProvider: (@Sendable () -> InputOutputLoggingRecorder?)? = nil,
+            promptCaching: PromptCachingConfiguration = .default,
+            contextCompaction: ContextCompactionConfiguration = .disabled
         ) {
             self.host = host
             self.port = port
@@ -170,8 +212,9 @@ final class LocalProxyServer: @unchecked Sendable {
             self.miniMaxRoutingMode = miniMaxRoutingMode
             self.preferredAnthropicUpstreamModel = preferredAnthropicUpstreamModel
             self.googleThoughtSignatureStore = googleThoughtSignatureStore
-            self.inputOutputLogger = inputOutputLogger
+            self.inputOutputLoggerProvider = inputOutputLoggerProvider
             self.promptCaching = promptCaching
+            self.contextCompaction = contextCompaction
         }
 
         var isLocalhostUpstream: Bool {
@@ -961,6 +1004,24 @@ final class LocalProxyServer: @unchecked Sendable {
         }
 
         // --- Standard path: translate Anthropic → OpenAI ---
+        let compaction = ContextCompactionAdapter.compactAnthropicSystem(
+            anthropicRequest["system"],
+            provider: config.upstreamProvider,
+            configuration: config.contextCompaction
+        )
+        if compaction.applied, let compactedSystem = compaction.system {
+            anthropicRequest["system"] = compactedSystem
+            let stat = ContextCompactionStat(
+                originalBytes: compaction.originalUTF8Bytes,
+                compactedBytes: compaction.compactedUTF8Bytes,
+                date: Date()
+            )
+            appendLog("acca: system \(LocalProxyServerHelpers.formatByteCount(compaction.originalUTF8Bytes)) → \(LocalProxyServerHelpers.formatByteCount(compaction.compactedUTF8Bytes)) (\(compaction.strategy))")
+            Task { @MainActor [weak self] in
+                self?.state.lastContextCompaction = stat
+            }
+        }
+
         let translationContext = AnthropicTranslator.TranslationContext(
             upstreamProvider: config.upstreamProvider,
             resolvedUpstreamModel: upstreamModel,

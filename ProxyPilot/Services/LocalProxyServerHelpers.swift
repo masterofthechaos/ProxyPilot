@@ -40,6 +40,17 @@ enum LocalProxyServerHelpers {
         return result
     }
 
+    // MARK: - Byte Formatting
+
+    /// Compact, deterministic byte-count display for log lines and the
+    /// context-compaction stats UI ("118.4 KB", "312 B").
+    static func formatByteCount(_ bytes: Int) -> String {
+        guard bytes >= 1024 else { return "\(bytes) B" }
+        let kb = Double(bytes) / 1024.0
+        guard kb >= 1024 else { return String(format: "%.1f KB", kb) }
+        return String(format: "%.1f MB", kb / 1024.0)
+    }
+
     // MARK: - Route Classification
 
     /// Identifies the logical route for an incoming request.

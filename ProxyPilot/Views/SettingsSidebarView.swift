@@ -57,7 +57,6 @@ struct SettingsSidebarView: View {
                 }
                 .padding(8)
             }
-            .navigationTitle(AppBuildBadge.currentAppDisplayName)
 
             Divider()
 

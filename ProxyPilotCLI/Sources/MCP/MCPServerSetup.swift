@@ -177,7 +177,8 @@ enum MCPServerSetup {
         provider: String?,
         key: String?,
         upstreamURL: String? = nil,
-        promptCaching: CLIPromptCachingMode = .auto
+        promptCaching: CLIPromptCachingMode = .auto,
+        contextCompaction: CLIContextCompactionMode = .auto
     ) async throws {
         let state = ProxyState()
         let lifecycleGate = LifecycleGate()
@@ -674,7 +675,8 @@ enum MCPServerSetup {
                     sessionStats: state.sessionStats,
                     googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
                     inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID),
-                    promptCaching: reqPromptCaching.configuration
+                    promptCaching: reqPromptCaching.configuration,
+                    contextCompaction: contextCompaction.configuration()
                 )
 
                 do {
@@ -825,7 +827,8 @@ enum MCPServerSetup {
                     sessionStats: state.sessionStats,
                     googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
                     inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID),
-                    promptCaching: reqPromptCaching.configuration
+                    promptCaching: reqPromptCaching.configuration,
+                    contextCompaction: contextCompaction.configuration()
                 )
 
                 do {

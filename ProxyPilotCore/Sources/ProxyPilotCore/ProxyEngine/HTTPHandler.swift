@@ -246,6 +246,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                 googleThoughtSignatureStore: config.googleThoughtSignatureStore,
                 inputOutputLogger: config.inputOutputLogger,
                 promptCaching: config.promptCaching,
+                contextCompaction: config.contextCompaction,
                 sessionID: config.sessionID
             )
 
@@ -280,6 +281,15 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         // --- Standard path: translate Anthropic → OpenAI ---
+        let compaction = ContextCompactionAdapter.compactAnthropicSystem(
+            anthropicRequest["system"],
+            provider: config.upstreamProvider,
+            configuration: config.contextCompaction
+        )
+        if compaction.applied, let compactedSystem = compaction.system {
+            anthropicRequest["system"] = compactedSystem
+        }
+
         let originalModel = anthropicRequest["model"] as? String ?? "claude"
         let resolvedUpstreamModel = config.preferredAnthropicUpstreamModel.isEmpty
             ? (anthropicRequest["model"] as? String ?? "")

@@ -156,6 +156,39 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(relaunched.promptCachingConfiguration.canonicalizeJSONForCache)
     }
 
+    func testContextCompactionDefaultsOffAndPersists() {
+        var vm: AppViewModel? = AppViewModel(defaults: defaults)
+
+        XCTAssertFalse(vm?.contextCompactionEnabled ?? true)
+        XCTAssertFalse(vm?.contextCompactionConfiguration.isEnabled ?? true)
+
+        vm?.contextCompactionEnabled = true
+        vm = nil
+
+        // The preference persists so an early opt-in survives the feature
+        // gate opening later; the *effective* configuration is asserted in
+        // testContextCompactionConfigurationIsFeatureGated.
+        let relaunched = AppViewModel(defaults: defaults)
+        XCTAssertTrue(relaunched.contextCompactionEnabled)
+    }
+
+    func testContextCompactionConfigurationIsFeatureGated() throws {
+        // Ruleset v2 (2026-07-14 Xcode-wall capture) opens the MVP feature
+        // gate, so the effective configuration follows the user preference.
+        XCTAssertTrue(ContextCompactionFeatureGate.isAvailable)
+
+        let vm = AppViewModel(defaults: defaults)
+        vm.proxyURLString = "http://127.0.0.1:4000"
+
+        vm.contextCompactionEnabled = true
+        XCTAssertTrue(vm.contextCompactionConfiguration.isEnabled)
+        XCTAssertTrue(try vm.buildBuiltInProxyConfig().contextCompaction.isEnabled)
+
+        vm.contextCompactionEnabled = false
+        XCTAssertFalse(vm.contextCompactionConfiguration.isEnabled)
+        XCTAssertFalse(try vm.buildBuiltInProxyConfig().contextCompaction.isEnabled)
+    }
+
     func testAgentModeDefaultsToClaudeAndPersistsProxyPilotSelection() {
         var vm: AppViewModel? = AppViewModel(defaults: defaults)
 
