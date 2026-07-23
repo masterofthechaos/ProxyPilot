@@ -71,7 +71,7 @@ Xcode validates by calling `GET /v1/models` on the local proxy.
 - **Watchdog auto-recovery** -- detects unexpected stops and retries startup with backoff
 - **Auto-start on login** -- register via SMAppService (toggle in Settings)
 - **SSE streaming** -- full `stream: true` support for `/v1/chat/completions`
-- **Multi-provider** -- 9 upstream providers including direct Google Gemini support
+- **Multi-provider** -- 16 upstream providers including direct Google Gemini support
 - **Anthropic API translation** -- `POST /v1/messages` translated to OpenAI format, supports both buffered and streaming responses
 - **Xcode Agent config** -- one-click install for Claude Agent in Xcode routing through ProxyPilot
 - **Safety limits** -- request/concurrency caps with explicit `413`/`429` responses
@@ -83,10 +83,17 @@ Xcode validates by calling `GET /v1/models` on the local proxy.
 | z.ai | Cloud | Yes |
 | OpenRouter | Cloud | Yes |
 | OpenAI | Cloud | Yes |
-| Google (Gemini) | Cloud | Yes |
-| xAI | Cloud | Yes |
+| xAI (Grok) | Cloud | Yes |
 | Chutes | Cloud | Yes |
 | Groq | Cloud | Yes |
+| Google (Gemini) | Cloud | Yes |
+| DeepSeek | Cloud | Yes |
+| Mistral | Cloud | Yes |
+| MiniMax | Cloud | Yes |
+| MiniMax CN | Cloud | Yes |
+| Qwen | Cloud | Yes |
+| 9Router | Local helper | No |
+| GitHub Copilot | Local helper | No |
 | Ollama | Local | No |
 | LM Studio | Local | No |
 

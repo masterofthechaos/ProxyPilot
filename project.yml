@@ -9,11 +9,13 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle
     from: "2.8.0"
+  ProxyPilotCore:
+    path: ProxyPilotCore
 settings:
   base:
     SWIFT_VERSION: 6.0
     MARKETING_VERSION: "1.12.1"
-    CURRENT_PROJECT_VERSION: "40"
+    CURRENT_PROJECT_VERSION: "132"
 targets:
   ProxyPilot-macOS:
     type: application
@@ -26,6 +28,8 @@ targets:
       - path: ProxyPilot/Resources/verified-models.json
     dependencies:
       - package: Sparkle
+      - package: ProxyPilotCore
+        product: ProxyPilotCore
     info:
       path: ProxyPilot/Info.plist
       properties:
@@ -33,7 +37,7 @@ targets:
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         LSApplicationCategoryType: public.app-category.developer-tools
         NSHumanReadableCopyright: ""
-        NSHumanReadableDescription: "Local OpenAI-compatible proxy for Xcode Intelligence and Agent Mode. Supports z.ai, OpenRouter, OpenAI, Google, xAI, Chutes, Groq with per-provider API keys."
+        NSHumanReadableDescription: "Local OpenAI-compatible proxy for Xcode Intelligence and Agent Mode. Supports z.ai, OpenRouter, OpenAI, Google, Qwen, xAI, Chutes, Groq, and more with per-provider API keys."
         NSSupportsAutomaticTermination: true
         NSSupportsSuddenTermination: true
         # ── CHANGE these to your own Sparkle + analytics keys ────────
