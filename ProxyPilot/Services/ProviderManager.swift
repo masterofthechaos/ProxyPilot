@@ -18,7 +18,12 @@ final class ProviderManager: ObservableObject {
     static let defaultModelsKeyPrefix = "proxypilot.defaultModels."
     static let xcodeAgentModelLegacyDefaultsKey = "proxypilot.xcodeAgentModel"
     static let xcodeAgentModelDefaultsKeyPrefix = "proxypilot.xcodeAgentModel."
-    static let upstreamModelCacheKeyPrefix = "proxypilot.upstreamModelCache."
+    /// Versioned: blobs cached before cache pricing was decoded carry no cache prices,
+    /// and the cache has no TTL — hydration only refetches when the list is empty, so a
+    /// stale blob would pin a user to no-cache cost estimates indefinitely. Bumping the
+    /// prefix forces exactly one clean refetch.
+    static let upstreamModelCacheKeyPrefix = "proxypilot.upstreamModelCache.v2."
+    static let legacyUpstreamModelCacheKeyPrefix = "proxypilot.upstreamModelCache."
     static let exactoFilterDefaultsKey = "proxypilot.openrouter.exactoFilter"
     static let verifiedFilterDefaultsKey = "proxypilot.openrouter.verifiedFilter"
     static let showModelMetadataDefaultsKey = "proxypilot.showModelMetadata"
@@ -156,9 +161,19 @@ final class ProviderManager: ObservableObject {
             miniMaxRoutingMode = mode
         }
 
+        Self.purgeLegacyUpstreamModelCache(from: defaults)
         upstreamModels = Self.cachedUpstreamModels(from: defaults, provider: upstreamProvider)
         rebuildUpstreamModelLookup()
         selectedUpstreamModels.formUnion(savedDefaultModelSet)
+    }
+
+    /// Drops the pre-v2 model cache blobs the prefix bump orphaned. These are large —
+    /// a full OpenRouter catalog per provider — so leaving them would strand hundreds
+    /// of kilobytes of unreachable data in the user's defaults forever.
+    static func purgeLegacyUpstreamModelCache(from defaults: UserDefaults) {
+        for provider in UpstreamProvider.allCases {
+            defaults.removeObject(forKey: legacyUpstreamModelCacheKeyPrefix + provider.rawValue)
+        }
     }
 
     // MARK: - Computed Properties

@@ -133,29 +133,59 @@ final class ProxyService {
 
         do {
             let decoded = try JSONDecoder().decode(OpenAIModelsResponse.self, from: normalized.data)
-            return decoded.data.map { model in
-                let promptPer1M = model.pricing?.prompt.flatMap(Double.init).map { $0 * 1_000_000 }
-                let completionPer1M = model.pricing?.completion.flatMap(Double.init).map { $0 * 1_000_000 }
-                let discovered = UpstreamModel(
-                    id: model.id,
-                    contextLength: model.contextLength,
-                    promptPricePer1M: promptPer1M,
-                    completionPricePer1M: completionPer1M,
-                    supportedParameters: Set(model.supportedParameters ?? [])
-                )
-                guard discovered.promptPricePer1M == nil,
-                      discovered.completionPricePer1M == nil,
-                      let known = provider.knownModelMetadata(for: model.id) else {
-                    return discovered
-                }
-                return known
-            }.sorted { $0.id < $1.id }
+            return Self.upstreamModels(from: decoded, provider: provider)
         } catch {
             if let fallback = provider.fallbackModelIDs {
                 return fallback.map(UpstreamModel.idOnly)
             }
             throw error
         }
+    }
+
+    /// Maps a decoded `/v1/models` payload onto `UpstreamModel`, converting per-token
+    /// prices to per-million. Extracted from `fetchUpstreamModels` so the mapping —
+    /// especially the cache-pricing rules below — is testable without a network round
+    /// trip, following the same pure-helper split as `LocalProxyServerHelpers`.
+    static func upstreamModels(
+        from response: OpenAIModelsResponse,
+        provider: UpstreamProvider
+    ) -> [UpstreamModel] {
+        response.data.map { model in
+            let pricing = model.pricing
+            let perMillion: (String?) -> Double? = { raw in
+                raw.flatMap(Double.init).map { $0 * 1_000_000 }
+            }
+
+            let promptPer1M = perMillion(pricing?.prompt)
+            let completionPer1M = perMillion(pricing?.completion)
+            let cacheReadPer1M = perMillion(pricing?.inputCacheRead)
+            let cacheWritePer1M = perMillion(pricing?.inputCacheWrite)
+
+            // The hit/miss pair is only meaningful together: `prompt` *is* the uncached
+            // input price, so it doubles as the miss price — but only once we know a
+            // cache-read price exists. Populating the miss price unconditionally would
+            // flip `pricingPerMillionLabel` into its "cached · uncached" form for every
+            // model, including ones the provider does no caching for at all.
+            let hitPer1M = cacheReadPer1M
+            let missPer1M = cacheReadPer1M == nil ? nil : promptPer1M
+
+            let discovered = UpstreamModel(
+                id: model.id,
+                contextLength: model.contextLength,
+                promptPricePer1M: promptPer1M,
+                completionPricePer1M: completionPer1M,
+                promptCacheHitPricePer1M: hitPer1M,
+                promptCacheMissPricePer1M: missPer1M,
+                promptCacheWritePricePer1M: cacheWritePer1M,
+                supportedParameters: Set(model.supportedParameters ?? [])
+            )
+            guard discovered.promptPricePer1M == nil,
+                  discovered.completionPricePer1M == nil,
+                  let known = provider.knownModelMetadata(for: model.id) else {
+                return discovered
+            }
+            return known
+        }.sorted { $0.id < $1.id }
     }
 
     func testUpstreamChat(
@@ -388,16 +418,27 @@ final class ProxyService {
     }
 }
 
-private struct OpenAIModelsResponse: Decodable {
+struct OpenAIModelsResponse: Decodable {
     struct Model: Decodable {
         let id: String
         let contextLength: Int?
         let pricing: Pricing?
         let supportedParameters: [String]?
 
+        /// Prices arrive as decimal strings in USD **per single token**
+        /// (e.g. `"0.000002"`); `UpstreamModel` stores them per million.
         struct Pricing: Decodable {
             let prompt: String?
             let completion: String?
+            let inputCacheRead: String?
+            let inputCacheWrite: String?
+
+            enum CodingKeys: String, CodingKey {
+                case prompt
+                case completion
+                case inputCacheRead = "input_cache_read"
+                case inputCacheWrite = "input_cache_write"
+            }
         }
 
         enum CodingKeys: String, CodingKey {

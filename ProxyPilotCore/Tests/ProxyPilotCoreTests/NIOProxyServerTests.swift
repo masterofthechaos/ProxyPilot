@@ -179,7 +179,7 @@ struct NIOProxyServerTests {
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         #expect(json["object"] as? String == "list")
         let models = json["data"] as! [[String: Any]]
-        #expect(models.count == 2)
+        #expect(Set(models.compactMap { $0["id"] as? String }) == ["gpt-4o", "claude-3", ActiveModelAlias.id])
 
         try await server.stop()
     }
@@ -252,7 +252,7 @@ struct NIOProxyServerTests {
         #expect(httpResponse.statusCode == 200)
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         let models = json["data"] as! [[String: Any]]
-        #expect(models.count == 1)
+        #expect(Set(models.compactMap { $0["id"] as? String }) == ["test-model", ActiveModelAlias.id])
 
         try await server.stop()
     }
@@ -352,6 +352,22 @@ struct NIOProxyServerTests {
 
         try await server.stop()
         try await stub.stop()
+    }
+
+    @Test func activeAliasIsRewrittenBeforeUpstream() async throws {
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(statusCode: 200, body: #"{"id":"alias","model":"actual-model","choices":[]}"#, requireJSONRequest: true)
+        let config = ProxyConfiguration(port: 0, upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)", allowedModels: ["actual-model"], preferredAnthropicUpstreamModel: "actual-model")
+        let server = NIOProxyServer(); let port = try await server.start(config: config)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!); request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["model": ActiveModelAlias.id, "messages": [["role": "user", "content": "hi"]]])
+        let (_, response) = try await URLSession.shared.data(for: request); #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let capturedRequest = try #require(stub.requests().first)
+        let captured = try #require(capturedRequest.body.data(using: .utf8))
+        let object = try #require(JSONSerialization.jsonObject(with: captured) as? [String: Any])
+        #expect(object["model"] as? String == "actual-model")
+        #expect(!capturedRequest.body.contains(ActiveModelAlias.id))
+        try await server.stop(); try await stub.stop()
     }
 
     @Test func chatCompletionsRejectsDisallowedModelBeforeForwarding() async throws {
@@ -793,6 +809,8 @@ struct NIOProxyServerTests {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("repogps", forHTTPHeaderField: "X-ProxyPilot-Client")
+        request.setValue("00000000-0000-0000-0000-000000000123", forHTTPHeaderField: "X-ProxyPilot-Session-ID")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "requested-model",
             "messages": [["role": "user", "content": "hi"]]
@@ -803,8 +821,8 @@ struct NIOProxyServerTests {
 
         let events = try SessionReportStore.readEvents(from: reportURL)
         #expect(events.count == 1)
-        #expect(events[0].source == "cli")
-        #expect(events[0].sessionID == "nio-test")
+        #expect(events[0].source == "repogps")
+        #expect(events[0].sessionID == "00000000-0000-0000-0000-000000000123")
         #expect(events[0].record.model == "glm-5")
         #expect(events[0].record.promptTokens == 12)
         #expect(events[0].record.completionTokens == 7)
@@ -940,6 +958,178 @@ struct NIOProxyServerTests {
         #expect(records[0].model == "test-model")
         #expect(records[0].input?.text?.contains("secret prompt") == true)
         #expect(records[0].output?.text?.contains("logged output") == true)
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
+    /// Regression: enabling input/output capture while the proxy is already
+    /// running must start recording without a restart. The CLI/MCP entry points
+    /// used to resolve the recorder once at daemon start, so a proxy that came up
+    /// with capture off could never log for the rest of its life — the defect in
+    /// `docs/session-punch-cards/punch-outs/2026-07-08T21-53-57-0400-cli-io-log-session-mismatch.md`.
+    @Test func inputOutputCaptureEnabledMidSessionRecordsWithoutRestart() async throws {
+        final class LoggerBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var recorder: InputOutputLoggingRecorder?
+
+            func current() -> InputOutputLoggingRecorder? {
+                lock.lock()
+                defer { lock.unlock() }
+                return recorder
+            }
+
+            func attach(_ recorder: InputOutputLoggingRecorder) {
+                lock.lock()
+                defer { lock.unlock() }
+                self.recorder = recorder
+            }
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let preferencesStore = InputOutputLoggingPreferencesStore(
+            url: directory.appendingPathComponent("settings.json")
+        )
+        try preferencesStore.save(InputOutputLoggingPreferences(
+            enabled: true,
+            recordInputs: true,
+            recordOutputs: true,
+            cliEnabled: true,
+            retention: .twentyFourHoursDefault
+        ))
+        let logStore = InputOutputLogStore(
+            url: directory.appendingPathComponent("records.jsonl.enc"),
+            encryptionKey: Data(repeating: 11, count: 32)
+        )
+
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: "{\"id\":\"chatcmpl-test\",\"model\":\"test-model\",\"choices\":[{\"message\":{\"content\":\"reply\"}}]}"
+        )
+
+        // The proxy starts with capture unavailable, exactly as a CLI daemon
+        // launched before logging was enabled would.
+        let box = LoggerBox()
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
+            requiresAuth: false,
+            inputOutputLoggerProvider: { box.current() }
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        func sendRequest(prompt: String) async throws {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": "test-model",
+                "messages": [["role": "user", "content": prompt]]
+            ])
+            let (_, response) = try await URLSession.shared.data(for: request)
+            #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        }
+
+        try await sendRequest(prompt: "before enabling")
+        #expect(try await logStore.readRecords().isEmpty)
+
+        // Capture becomes available mid-session. No restart.
+        box.attach(InputOutputLoggingRecorder(
+            source: "cli",
+            preferencesStore: preferencesStore,
+            logStore: logStore
+        ))
+
+        try await sendRequest(prompt: "after enabling")
+
+        let records = try await logStore.readRecords()
+        #expect(records.count == 1)
+        #expect(records[0].source == "cli")
+        #expect(records[0].input?.text?.contains("after enabling") == true)
+        #expect(records[0].input?.text?.contains("before enabling") != true)
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
+    @Test func inputOutputLogFilesUnderAttributedSessionNotDaemonSession() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let preferencesStore = InputOutputLoggingPreferencesStore(
+            url: directory.appendingPathComponent("settings.json")
+        )
+        try preferencesStore.save(InputOutputLoggingPreferences(
+            enabled: true,
+            recordInputs: true,
+            recordOutputs: true,
+            cliEnabled: true,
+            retention: .twentyFourHoursDefault
+        ))
+        let logStore = InputOutputLogStore(
+            url: directory.appendingPathComponent("records.jsonl.enc"),
+            encryptionKey: Data(repeating: 12, count: 32)
+        )
+
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: "{\"id\":\"chatcmpl-test\",\"model\":\"test-model\",\"choices\":[{\"message\":{\"content\":\"reply\"}}]}"
+        )
+
+        // The daemon's recorder is bound to its own session ID, exactly as the
+        // CLI's InputOutputLoggerSessionCache builds it.
+        let daemonSessionID = UUID().uuidString
+        let recorder = InputOutputLoggingRecorder(
+            source: "cli",
+            sessionID: daemonSessionID,
+            preferencesStore: preferencesStore,
+            logStore: logStore
+        )
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
+            requiresAuth: false,
+            inputOutputLoggerProvider: { recorder },
+            sessionID: daemonSessionID
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        // A RepoGPS-style attributed request: the record must file under the
+        // header session, mirroring how SessionStats attributes its report —
+        // not under the daemon's own session, where `sessions show
+        // <agent-session> --include-logs` would never find it.
+        let attributedSessionID = "6B2B0F4C-9A41-4E0F-8D57-1B2A3C4D5E6F"
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("repogps", forHTTPHeaderField: "X-ProxyPilot-Client")
+        request.setValue(attributedSessionID, forHTTPHeaderField: "X-ProxyPilot-Session-ID")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "test-model",
+            "messages": [["role": "user", "content": "attributed request"]]
+        ])
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+        let attributed = try await logStore.readRecords(
+            matchingSessionID: attributedSessionID.lowercased()
+        )
+        #expect(attributed.count == 1)
+        #expect(attributed.first?.source == "repogps")
+        #expect(attributed.first?.input?.text?.contains("attributed request") == true)
+
+        let daemon = try await logStore.readRecords(matchingSessionID: daemonSessionID)
+        #expect(daemon.isEmpty)
 
         try await server.stop()
         try await stub.stop()

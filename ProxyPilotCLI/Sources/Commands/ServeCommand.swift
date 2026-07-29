@@ -50,6 +50,9 @@ struct ServeCommand: AsyncParsableCommand {
         let sessionID = UUID().uuidString
         let sessionStats = SessionStats(sessionReportURL: SessionReportStore.defaultURL, sessionSource: "cli", sessionID: sessionID)
         await sessionStats.reset(clearReportStore: false)
+        // Resolved per request, not frozen here: enabling CLI capture while the
+        // proxy is already running must take effect without a restart.
+        let inputOutputLoggerCache = InputOutputLoggerSessionCache()
         let config = ProxyConfiguration(
             port: port,
             upstreamProvider: upstreamProvider,
@@ -57,7 +60,7 @@ struct ServeCommand: AsyncParsableCommand {
             upstreamAPIKey: resolvedCredential.apiKey,
             sessionStats: sessionStats,
             googleThoughtSignatureStore: upstreamProvider == .google ? GoogleThoughtSignatureStore() : nil,
-            inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "cli", sessionID: sessionID),
+            inputOutputLoggerProvider: inputOutputLoggerCache.provider(source: "cli", sessionID: sessionID),
             promptCaching: promptCaching.configuration,
             contextCompaction: contextCompaction.configuration()
         )

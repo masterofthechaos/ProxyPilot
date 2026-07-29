@@ -3,6 +3,11 @@ import ProxyPilotCore
 @testable import ProxyPilot
 
 final class SessionHistorySessionTests: XCTestCase {
+    func testRepoGPSSourceUsesProductLabel() {
+        let session = SessionHistorySession(id: "repogps-run", source: "repogps", requests: [])
+        XCTAssertEqual(session.sourceLabel, "RepoGPS")
+        XCTAssertTrue(session.isRepoGPS)
+    }
     func testBuildsNewestFirstSessionSummariesFromReportEvents() {
         let older = Date(timeIntervalSince1970: 100)
         let newer = Date(timeIntervalSince1970: 200)

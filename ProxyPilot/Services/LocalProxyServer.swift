@@ -115,31 +115,9 @@ final class LocalProxyState: ObservableObject {
     }
 }
 
-/// Memoizes the session's `InputOutputLoggingRecorder` so every request shares
-/// one underlying store actor (serialized appends) while still resolving
-/// lazily: if logging is disabled when the proxy starts, each request re-checks
-/// the shared preferences until logging becomes effective, then caches the
-/// recorder for the rest of the session.
-final class InputOutputLoggerSessionCache: @unchecked Sendable {
-    private let lock = NSLock()
-    private var cached: InputOutputLoggingRecorder?
-
-    func recorder(
-        source: String,
-        sessionID: String,
-        preferencesStore: InputOutputLoggingPreferencesStore
-    ) -> InputOutputLoggingRecorder? {
-        lock.lock()
-        defer { lock.unlock() }
-        if let cached { return cached }
-        cached = try? InputOutputLoggingRecorder.productionIfConfigured(
-            source: source,
-            sessionID: sessionID,
-            preferencesStore: preferencesStore
-        )
-        return cached
-    }
-}
+// `InputOutputLoggerSessionCache` now lives in ProxyPilotCore so the GUI, CLI,
+// and MCP proxy entry points share one implementation. See
+// `ProxyPilotCore/Sources/ProxyPilotCore/Models/InputOutputLoggingStore.swift`.
 
 final class LocalProxyServer: @unchecked Sendable {
     enum ServerError: LocalizedError {
@@ -531,38 +509,27 @@ final class LocalProxyServer: @unchecked Sendable {
 
         if method == "POST" && (path == "/v1/chat/completions" || path == "/chat/completions" || path == "/v1/messages") {
             let trackingID = UUID()
+            let attribution = RequestAttribution.validated(headers: headers)
             let modelName = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String
             beginTrackedRequest(id: trackingID, modelName: modelName)
 
             if path == "/v1/messages" {
                 Task.detached { [weak self] in
-                    await self?.handleAnthropicMessages(
-                        body: body,
-                        headers: headers,
-                        connection: connection,
-                        config: config,
-                        trackingID: trackingID
-                    )
+                    await RequestAttributionContext.$current.withValue(attribution) {
+                        await self?.handleAnthropicMessages(body: body, headers: headers, connection: connection, config: config, trackingID: trackingID)
+                    }
                 }
                 return
             }
 
             let isStreaming = isStreamingRequest(body: body)
             Task.detached { [weak self] in
-                if isStreaming {
-                    await self?.handleStreamingChatCompletions(
-                        body: body,
-                        connection: connection,
-                        config: config,
-                        trackingID: trackingID
-                    )
-                } else {
-                    await self?.handleChatCompletions(
-                        body: body,
-                        connection: connection,
-                        config: config,
-                        trackingID: trackingID
-                    )
+                await RequestAttributionContext.$current.withValue(attribution) {
+                    if isStreaming {
+                        await self?.handleStreamingChatCompletions(body: body, connection: connection, config: config, trackingID: trackingID)
+                    } else {
+                        await self?.handleChatCompletions(body: body, connection: connection, config: config, trackingID: trackingID)
+                    }
                 }
             }
             return
@@ -575,7 +542,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
     private func handleGetModels(path: String, connection: NWConnection, config: Config) {
         let now = Int(Date().timeIntervalSince1970)
-        let models = config.allowedModels.sorted()
+        let models = config.allowedModels.union(config.allowedModels.isEmpty ? [] : [ActiveModelAlias.id]).sorted()
         let data: [[String: Any]] = models.map { id in
             [
                 "id": id,
@@ -634,7 +601,7 @@ final class LocalProxyServer: @unchecked Sendable {
         if !config.allowedModels.isEmpty {
             if let requestedModel = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
                let model = requestedModel["model"] as? String,
-               !config.allowedModels.contains(model) {
+               !ActiveModelAlias.accepts(model, allowedModels: config.allowedModels) {
                 respond(
                     connection: connection,
                     status: 400,
@@ -646,7 +613,8 @@ final class LocalProxyServer: @unchecked Sendable {
             }
         }
 
-        let outboundBody = sanitizedChatRequestBody(body, provider: config.upstreamProvider)
+        let rewrittenBody = ActiveModelAlias.rewriteJSONBody(body, activeModel: config.preferredAnthropicUpstreamModel)
+        let outboundBody = sanitizedChatRequestBody(rewrittenBody, provider: config.upstreamProvider)
         let upstreamURL = buildUpstreamURL(config: config, path: config.upstreamProvider.chatCompletionsPath)
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "POST"
@@ -748,7 +716,7 @@ final class LocalProxyServer: @unchecked Sendable {
         if !config.allowedModels.isEmpty {
             if let requestedModel = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
                let model = requestedModel["model"] as? String,
-               !config.allowedModels.contains(model) {
+               !ActiveModelAlias.accepts(model, allowedModels: config.allowedModels) {
                 respond(
                     connection: connection,
                     status: 400,
@@ -760,7 +728,8 @@ final class LocalProxyServer: @unchecked Sendable {
             }
         }
 
-        let outboundBody = sanitizedChatRequestBody(body, provider: config.upstreamProvider)
+        let rewrittenBody = ActiveModelAlias.rewriteJSONBody(body, activeModel: config.preferredAnthropicUpstreamModel)
+        let outboundBody = sanitizedChatRequestBody(rewrittenBody, provider: config.upstreamProvider)
         let upstreamURL = buildUpstreamURL(config: config, path: config.upstreamProvider.chatCompletionsPath)
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "POST"
@@ -1735,7 +1704,8 @@ final class LocalProxyServer: @unchecked Sendable {
         trackingID: UUID
     ) async {
         let record = recordWithAllowedCacheTelemetry(record, promptCaching: config.promptCaching)
-        let currentSessionID = config.sessionID
+        let attribution = RequestAttributionContext.current
+        let currentSessionID = attribution?.sessionID ?? config.sessionID
         let shouldRecord = await MainActor.run { [weak self] in
             guard let self else { return false }
             guard self.state.completeRequest(id: trackingID) else { return false }
@@ -1758,7 +1728,7 @@ final class LocalProxyServer: @unchecked Sendable {
         )
         try? SessionReportStore.append(
             SessionReportEvent(
-                source: "gui",
+                source: attribution?.client ?? "gui",
                 sessionID: currentSessionID,
                 record: coreRecord
             )

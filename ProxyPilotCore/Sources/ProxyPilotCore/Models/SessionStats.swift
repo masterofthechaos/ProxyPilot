@@ -61,9 +61,10 @@ public actor SessionStats {
         if let write = record.promptCacheWriteTokens { promptCacheWriteTokens += write }
 
         guard let sessionReportURL else { return }
+        let attribution = RequestAttributionContext.current
         let event = SessionReportEvent(
-            source: sessionSource,
-            sessionID: sessionID,
+            source: attribution?.client ?? sessionSource,
+            sessionID: attribution?.sessionID ?? sessionID,
             record: record
         )
         try? SessionReportStore.append(event, to: sessionReportURL)

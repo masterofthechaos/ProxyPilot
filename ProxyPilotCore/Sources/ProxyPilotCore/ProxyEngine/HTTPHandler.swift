@@ -113,18 +113,21 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        switch (head.method, path) {
-        case (.GET, "/v1/models"), (.GET, "/models"):
-            handleModels(context: context)
-
-        case (.POST, "/v1/chat/completions"), (.POST, "/chat/completions"):
-            handleChatCompletions(context: context, head: head, body: body, path: path)
-
-        case (.POST, "/v1/messages"):
-            handleAnthropicMessages(context: context, head: head, body: body)
-
-        default:
-            sendErrorResponse(context: context, status: .notFound, message: "Not found")
+        let attribution = RequestAttribution.validated(
+            client: head.headers["X-ProxyPilot-Client"].first,
+            sessionID: head.headers["X-ProxyPilot-Session-ID"].first
+        )
+        RequestAttributionContext.$current.withValue(attribution) {
+            switch (head.method, path) {
+            case (.GET, "/v1/models"), (.GET, "/models"):
+                handleModels(context: context)
+            case (.POST, "/v1/chat/completions"), (.POST, "/chat/completions"):
+                handleChatCompletions(context: context, head: head, body: body, path: path)
+            case (.POST, "/v1/messages"):
+                handleAnthropicMessages(context: context, head: head, body: body)
+            default:
+                sendErrorResponse(context: context, status: .notFound, message: "Not found")
+            }
         }
     }
 
@@ -157,7 +160,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - Models Endpoint
 
     private func handleModels(context: ChannelHandlerContext) {
-        let modelEntries = config.allowedModels.sorted().map { model -> [String: Any] in
+        let advertisedModels = config.allowedModels.union(config.allowedModels.isEmpty ? [] : [ActiveModelAlias.id])
+        let modelEntries = advertisedModels.sorted().map { model -> [String: Any] in
             [
                 "id": model,
                 "object": "model",
@@ -200,12 +204,13 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if let requestedModel = anthropicRequest["model"] as? String,
-           !ModelFilter.isAllowed(requestedModel, in: config.allowedModels) {
+           !ActiveModelAlias.accepts(requestedModel, allowedModels: config.allowedModels) {
             sendErrorResponse(context: context, status: .badRequest, message: "Model not allowed")
             return
         }
 
         let isStreaming = anthropicRequest["stream"] as? Bool == true
+        if anthropicRequest["model"] as? String == ActiveModelAlias.id, !config.preferredAnthropicUpstreamModel.isEmpty { anthropicRequest["model"] = config.preferredAnthropicUpstreamModel }
         let headers: [(String, String)] = head.headers.map { ($0.name, $0.value) }
         let ctxBox = UnsafeSendableBox(value: context)
         let eventLoop = context.eventLoop
@@ -854,12 +859,13 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let isStreaming = HTTPRequestParser.isStreamingRequest(body: bodyData)
         let parsedRequestModel = HTTPRequestParser.extractModel(from: bodyData)
         if let parsedRequestModel,
-           !ModelFilter.isAllowed(parsedRequestModel, in: config.allowedModels) {
+           !ActiveModelAlias.accepts(parsedRequestModel, allowedModels: config.allowedModels) {
             sendErrorResponse(context: context, status: .badRequest, message: "Model not allowed")
             return
         }
 
-        let sanitizedBody = withStreamingUsageInjected(sanitizedChatRequestBody(bodyData))
+        let rewrittenBody = ActiveModelAlias.rewriteJSONBody(bodyData, activeModel: config.preferredAnthropicUpstreamModel)
+        let sanitizedBody = withStreamingUsageInjected(sanitizedChatRequestBody(rewrittenBody))
         let requestModel = parsedRequestModel ?? config.preferredAnthropicUpstreamModel
 
         // Collect headers as tuples

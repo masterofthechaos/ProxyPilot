@@ -1844,6 +1844,21 @@ final class AppViewModel: ObservableObject {
         return String(localized: "Selected model") + " \(model) " + String(localized: "will apply the next time ProxyPilot starts or restarts the proxy.")
     }
 
+    /// Mode-aware caveat about *when* a model change reaches the agent. Both modes are
+    /// routed by the same proxy-side remap, so the proxy-restart rule is shared — but
+    /// the ProxyPilot Agent launcher additionally exports `ANTHROPIC_MODEL` as a hint
+    /// baked at agent-session exec time (`AgentLauncherRuntime.buildLaunchPlan`), so a
+    /// session already running in Xcode keeps the model it launched with even after the
+    /// proxy has moved on. Stale hints are harmless — the proxy still remaps — but the
+    /// distinction matters to anyone reading the route state and wondering why a
+    /// running session looks unchanged.
+    var xcodeAgentRouteScopeNote: String {
+        if showsAgentModeChoice && selectedAgentMode == .proxyPilotAgent {
+            return String(localized: "The proxy applies the selected model to new requests. An agent session already running in Xcode keeps the model hint it launched with — start a new agent session to pick up a change.")
+        }
+        return String(localized: "Xcode picks up the selected model on its next request, once the proxy is running it.")
+    }
+
     var activeXcodeAgentModel: String {
         localProxyServer.state.activeXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -2220,7 +2235,8 @@ final class AppViewModel: ObservableObject {
             promptTokens: record.promptTokens,
             completionTokens: record.completionTokens,
             promptCacheHitTokens: record.promptCacheHitTokens,
-            promptCacheMissTokens: record.promptCacheMissTokens
+            promptCacheMissTokens: record.promptCacheMissTokens,
+            promptCacheWriteTokens: record.promptCacheWriteTokens
         )
     }
 

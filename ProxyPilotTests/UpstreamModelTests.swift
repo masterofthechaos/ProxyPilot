@@ -130,6 +130,66 @@ final class UpstreamModelTests: XCTestCase {
         XCTAssertEqual(cost, 0.42, accuracy: 0.000001)
     }
 
+    func testEstimatedCostUSDBillsCacheWriteTokensOnTopOfTheCacheSplit() throws {
+        // Cache creation is charged in addition to the uncached input it accompanies,
+        // so the write term is additive rather than a substitute for the miss cost.
+        let model = UpstreamModel(
+            id: "m",
+            contextLength: nil,
+            promptPricePer1M: 3.0,
+            completionPricePer1M: 15.0,
+            promptCacheHitPricePer1M: 0.3,
+            promptCacheMissPricePer1M: 3.0,
+            promptCacheWritePricePer1M: 3.75
+        )
+
+        let cost = try XCTUnwrap(model.estimatedCostUSD(
+            promptTokens: 1_000_000,
+            completionTokens: 1_000_000,
+            promptCacheHitTokens: 400_000,
+            promptCacheMissTokens: 600_000,
+            promptCacheWriteTokens: 200_000
+        ))
+        // hit 0.12 + miss 1.80 + write 0.75 + completion 15.00
+        XCTAssertEqual(cost, 17.67, accuracy: 0.000001)
+    }
+
+    func testEstimatedCostUSDOmitsCacheWriteCostWhenWriteTokensAreMissing() throws {
+        // A provider that prices cache writes but reports no write tokens for this
+        // request must not be charged for creation it never performed.
+        let model = UpstreamModel(
+            id: "m",
+            contextLength: nil,
+            promptPricePer1M: 3.0,
+            completionPricePer1M: 15.0,
+            promptCacheHitPricePer1M: 0.3,
+            promptCacheMissPricePer1M: 3.0,
+            promptCacheWritePricePer1M: 3.75
+        )
+
+        let cost = try XCTUnwrap(model.estimatedCostUSD(
+            promptTokens: 1_000_000,
+            completionTokens: 1_000_000,
+            promptCacheHitTokens: 400_000,
+            promptCacheMissTokens: 600_000
+        ))
+        // hit 0.12 + miss 1.80 + completion 15.00, no write term
+        XCTAssertEqual(cost, 16.92, accuracy: 0.000001)
+    }
+
+    func testExactoVariantCarriesCacheWritePricingForward() {
+        let model = UpstreamModel(
+            id: "m",
+            contextLength: nil,
+            promptPricePer1M: 3.0,
+            completionPricePer1M: 15.0,
+            promptCacheHitPricePer1M: 0.3,
+            promptCacheMissPricePer1M: 3.0,
+            promptCacheWritePricePer1M: 3.75
+        )
+        XCTAssertEqual(model.exactoVariant.promptCacheWritePricePer1M, 3.75)
+    }
+
     func testPricingPerMillionLabelFormatsPromptAndCompletion() {
         let model = UpstreamModel(id: "m", contextLength: nil, promptPricePer1M: 0.5, completionPricePer1M: 2.0)
         XCTAssertEqual(model.pricingPerMillionLabel, "In $0.500/M · Out $2.00/M")

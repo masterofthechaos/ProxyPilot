@@ -17,7 +17,11 @@ public struct ProxyConfiguration: Sendable {
     public let preferredAnthropicUpstreamModel: String
     public let sessionStats: SessionStats?
     public let googleThoughtSignatureStore: GoogleThoughtSignatureStore?
-    public let inputOutputLogger: InputOutputLoggingRecorder?
+    /// Resolved on every request so logging preferences changed while the proxy
+    /// is running (enable/disable, retention, CLI/MCP scope) take effect live
+    /// instead of being frozen at proxy start.
+    public let inputOutputLoggerProvider: (@Sendable () -> InputOutputLoggingRecorder?)?
+    public var inputOutputLogger: InputOutputLoggingRecorder? { inputOutputLoggerProvider?() }
     public let promptCaching: PromptCachingConfiguration
     public let contextCompaction: ContextCompactionConfiguration
     public let sessionID: String
@@ -37,7 +41,7 @@ public struct ProxyConfiguration: Sendable {
         preferredAnthropicUpstreamModel: String = "",
         sessionStats: SessionStats? = nil,
         googleThoughtSignatureStore: GoogleThoughtSignatureStore? = nil,
-        inputOutputLogger: InputOutputLoggingRecorder? = nil,
+        inputOutputLoggerProvider: (@Sendable () -> InputOutputLoggingRecorder?)? = nil,
         promptCaching: PromptCachingConfiguration = .default,
         contextCompaction: ContextCompactionConfiguration = .disabled,
         sessionID: String = UUID().uuidString
@@ -56,10 +60,62 @@ public struct ProxyConfiguration: Sendable {
         self.preferredAnthropicUpstreamModel = preferredAnthropicUpstreamModel
         self.sessionStats = sessionStats
         self.googleThoughtSignatureStore = googleThoughtSignatureStore
-        self.inputOutputLogger = inputOutputLogger
+        self.inputOutputLoggerProvider = inputOutputLoggerProvider
         self.promptCaching = promptCaching
         self.contextCompaction = contextCompaction
         self.sessionID = sessionID
+    }
+
+    /// Convenience initializer for callers that already hold a resolved recorder
+    /// (tests, and any host that manages recorder lifetime itself). The recorder
+    /// is wrapped in a constant provider, so it is *not* re-resolved per request —
+    /// prefer the `inputOutputLoggerProvider:` initializer for live pickup.
+    public init(
+        host: String = "127.0.0.1",
+        port: UInt16 = 4000,
+        upstreamProvider: UpstreamProvider = .openAI,
+        upstreamAPIBaseURL: String? = nil,
+        upstreamAPIKey: String? = nil,
+        masterKey: String? = nil,
+        allowedModels: Set<String> = [],
+        requiresAuth: Bool = false,
+        maxRequestBodyBytes: Int = 10 * 1024 * 1024,
+        anthropicTranslatorMode: AnthropicTranslatorMode = .hardened,
+        miniMaxRoutingMode: MiniMaxRoutingMode = .standard,
+        preferredAnthropicUpstreamModel: String = "",
+        sessionStats: SessionStats? = nil,
+        googleThoughtSignatureStore: GoogleThoughtSignatureStore? = nil,
+        inputOutputLogger: InputOutputLoggingRecorder?,
+        promptCaching: PromptCachingConfiguration = .default,
+        contextCompaction: ContextCompactionConfiguration = .disabled,
+        sessionID: String = UUID().uuidString
+    ) {
+        let provider: (@Sendable () -> InputOutputLoggingRecorder?)?
+        if let inputOutputLogger {
+            provider = { inputOutputLogger }
+        } else {
+            provider = nil
+        }
+        self.init(
+            host: host,
+            port: port,
+            upstreamProvider: upstreamProvider,
+            upstreamAPIBaseURL: upstreamAPIBaseURL,
+            upstreamAPIKey: upstreamAPIKey,
+            masterKey: masterKey,
+            allowedModels: allowedModels,
+            requiresAuth: requiresAuth,
+            maxRequestBodyBytes: maxRequestBodyBytes,
+            anthropicTranslatorMode: anthropicTranslatorMode,
+            miniMaxRoutingMode: miniMaxRoutingMode,
+            preferredAnthropicUpstreamModel: preferredAnthropicUpstreamModel,
+            sessionStats: sessionStats,
+            googleThoughtSignatureStore: googleThoughtSignatureStore,
+            inputOutputLoggerProvider: provider,
+            promptCaching: promptCaching,
+            contextCompaction: contextCompaction,
+            sessionID: sessionID
+        )
     }
 
     /// Whether Anthropic passthrough is active for the current provider.

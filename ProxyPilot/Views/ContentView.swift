@@ -146,6 +146,21 @@ struct ContentView: View {
         .environment(\.proxypilotLiquidGlassEnabled, effectiveLiquidGlassEnabled)
     }
 
+    /// Deliberately a hand-rolled `HStack` and not a `NavigationSplitView`.
+    ///
+    /// The split view was tried (2026-07-29) to get the system-drawn Liquid Glass
+    /// sidebar material, which is the only supported way to have it. It had to be
+    /// reverted: inside `NavigationSplitView` the sidebar column's viewport height is
+    /// derived from the split rather than the window, and on a tall window the Session
+    /// History detail — the one section whose content is both very long and itself
+    /// scroll-based — pushed every sidebar row above the visible area, leaving the
+    /// navigation unreachable without switching to Compact. Swapping the sidebar's
+    /// `LazyVStack` for a plain `VStack` did not fix it and additionally broke the
+    /// detail column's scroll-to-top.
+    ///
+    /// Anyone reattempting this: reproduce on a *tall* window (the owner runs ~1080x1920
+    /// portrait near-fullscreen) on Session History specifically. A short window hides
+    /// the bug completely.
     private var splitSettingsBody: some View {
         HStack(spacing: 0) {
             SettingsSidebarView(
@@ -961,6 +976,26 @@ struct ContentView: View {
                         Text("Xcode usually refreshes Agent Modes automatically. Reopen Intelligence settings if a setup change is not visible yet.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+
+                        Divider()
+
+                        agentXcodeInstallationsBlock
+
+                        Divider()
+
+                        agentUpstreamModelBlock
+
+                        agentRouteStateBlock
+
+                        agentLiveProofBlock
+
+                        Divider()
+
+                        agentVisibleModelsBlock
+
+                        Divider()
+
+                        agentRoutingVerificationBlock
                     }
                 }
             }
@@ -974,101 +1009,15 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
-                    // Xcode Installations
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Detected Xcode Installations")
-                                .font(.subheadline)
-                            Spacer()
-                            Button("Rescan") {
-                                Task { await vm.detectXcodeInstallations() }
-                            }
-                            .font(.caption)
-                        }
-
-                        if vm.xcodeInstallations.isEmpty {
-                            Text("No Xcode installations found.")
-                                .font(.caption)
-                                .foregroundStyle(.orange)
-                        } else {
-                            ForEach(vm.xcodeInstallations) { xcode in
-                                HStack(spacing: 8) {
-                                    Image(systemName: xcode.supportsAgenticCoding
-                                        ? "checkmark.circle.fill" : "xmark.circle")
-                                        .foregroundStyle(xcode.supportsAgenticCoding ? .green : .red)
-
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        HStack(spacing: 4) {
-                                            Text("Xcode \(xcode.version)")
-                                                .font(.subheadline)
-                                            if xcode.isBeta {
-                                                Text("Beta")
-                                                    .font(.caption2)
-                                                    .padding(.horizontal, 5)
-                                                    .padding(.vertical, 1)
-                                                    .background(Capsule().fill(Color.orange.opacity(0.2)))
-                                                    .foregroundStyle(.orange)
-                                            }
-                                        }
-                                        Text("Build \(xcode.buildNumber)")
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Text(xcode.supportsAgenticCoding ? "Agent Ready" : "No Agent Support")
-                                        .font(.caption)
-                                        .foregroundStyle(xcode.supportsAgenticCoding ? .green : .secondary)
-                                }
-                            }
-                        }
-                    }
+                    agentXcodeInstallationsBlock
 
                     Divider()
 
-                    Picker("Xcode Agent Upstream Model", selection: Binding(
-                        get: { vm.selectedXcodeAgentModel },
-                        set: { vm.selectedXcodeAgentModel = $0 }
-                    )) {
-                        ForEach(vm.xcodeAgentModelCandidates, id: \.self) { model in
-                            Text(model).tag(model)
-                        }
-                    }
-                    .pickerStyle(.menu)
+                    agentUpstreamModelBlock
 
-                    Text(verbatim: vm.xcodeAgentRoutingSummaryText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    agentRouteStateBlock
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Route State")
-                            .font(.subheadline)
-                        LabeledContent("Selected") {
-                            Text(vm.xcodeAgentSelectedModelText)
-                                .textSelection(.enabled)
-                        }
-                        LabeledContent("Pending") {
-                            Text(vm.xcodeAgentPendingModelText)
-                                .textSelection(.enabled)
-                        }
-                        LabeledContent("Applied") {
-                            Text(vm.xcodeAgentAppliedModelText)
-                                .textSelection(.enabled)
-                        }
-                        LabeledContent("Live") {
-                            Text(vm.xcodeAgentLiveRouteText)
-                                .textSelection(.enabled)
-                        }
-                    }
-                    .font(.caption)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Last Xcode Agent Live Proof")
-                            .font(.subheadline)
-                        Text(vm.xcodeAgentLiveProofText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
+                    agentLiveProofBlock
 
                     // --- DIY Setup ---
                     DisclosureGroup(String(localized: "DIY Setup")) {
@@ -1159,69 +1108,11 @@ struct ContentView: View {
 
                     Divider()
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Xcode-Visible Models Right Now")
-                                .font(.subheadline)
-                            Spacer()
-                            Button(vm.isRefreshingXcodeVisibleModels ? "Refreshing..." : "Refresh") {
-                                Task { await vm.refreshXcodeVisibleModels() }
-                            }
-                            .disabled(vm.isRefreshingXcodeVisibleModels)
-                        }
-
-                        LabeledContent("Source") {
-                            Text(vm.xcodeVisibleModelsSourceText)
-                        }
-                        LabeledContent("Count") {
-                            Text("\(vm.xcodeVisibleModelsSnapshot.modelIDs.count)")
-                        }
-                        LabeledContent("Checked") {
-                            Text(vm.xcodeVisibleModelsTimestampText)
-                        }
-                        Text(vm.xcodeVisibleModelsStatusText)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text(vm.xcodeVisibleModelsListText)
-                            .font(.system(.caption2, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(nsColor: .controlBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                    }
-                    .font(.caption)
+                    agentVisibleModelsBlock
 
                     Divider()
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Verify Xcode Agent Routing (Terminal)")
-                                .font(.subheadline)
-                            Spacer()
-                            Button("Copy Commands") {
-                                copyRoutingVerificationCommands()
-                            }
-                        }
-
-                        Text("Run the first command in one terminal tab, then run the two `rg` commands after one Xcode Agent request.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Text(routingVerificationCommands)
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(8)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(nsColor: .controlBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-
-                        if routingVerificationCopied {
-                            Text("Copied verification commands.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                    agentRoutingVerificationBlock
                 }
                 }
             }
@@ -1383,6 +1274,187 @@ struct ContentView: View {
     // MARK: - Keys Tab
 
     @State private var showAddCustomProviderSheet = false
+
+    // MARK: - Shared Xcode Agent routing blocks
+    //
+    // Both agent modes are routed by the same machinery: `selectedXcodeAgentModel` →
+    // `effectiveXcodeAgentModel` → the proxy's `preferredAnthropicUpstreamModel` remap.
+    // These blocks describe *that* shared state, so they render identically in Claude
+    // Agent and ProxyPilot Agent mode. Only the install/registration mechanics differ,
+    // and those stay in their own mode-specific sections.
+
+    private var agentXcodeInstallationsBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Detected Xcode Installations")
+                    .font(.subheadline)
+                Spacer()
+                Button("Rescan") {
+                    Task { await vm.detectXcodeInstallations() }
+                }
+                .font(.caption)
+            }
+
+            if vm.xcodeInstallations.isEmpty {
+                Text("No Xcode installations found.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else {
+                ForEach(vm.xcodeInstallations) { xcode in
+                    HStack(spacing: 8) {
+                        Image(systemName: xcode.supportsAgenticCoding
+                            ? "checkmark.circle.fill" : "xmark.circle")
+                            .foregroundStyle(xcode.supportsAgenticCoding ? .green : .red)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 4) {
+                                Text("Xcode \(xcode.version)")
+                                    .font(.subheadline)
+                                if xcode.isBeta {
+                                    Text("Beta")
+                                        .font(.caption2)
+                                        .padding(.horizontal, 5)
+                                        .padding(.vertical, 1)
+                                        .background(Capsule().fill(Color.orange.opacity(0.2)))
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                            Text("Build \(xcode.buildNumber)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(xcode.supportsAgenticCoding ? "Agent Ready" : "No Agent Support")
+                            .font(.caption)
+                            .foregroundStyle(xcode.supportsAgenticCoding ? .green : .secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var agentUpstreamModelBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Xcode Agent Upstream Model", selection: Binding(
+                get: { vm.selectedXcodeAgentModel },
+                set: { vm.selectedXcodeAgentModel = $0 }
+            )) {
+                ForEach(vm.xcodeAgentModelCandidates, id: \.self) { model in
+                    Text(model).tag(model)
+                }
+            }
+            .pickerStyle(.menu)
+
+            Text(verbatim: vm.xcodeAgentRoutingSummaryText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Text(vm.xcodeAgentRouteScopeNote)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var agentRouteStateBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Route State")
+                .font(.subheadline)
+            LabeledContent("Selected") {
+                Text(vm.xcodeAgentSelectedModelText)
+                    .textSelection(.enabled)
+            }
+            LabeledContent("Pending") {
+                Text(vm.xcodeAgentPendingModelText)
+                    .textSelection(.enabled)
+            }
+            LabeledContent("Applied") {
+                Text(vm.xcodeAgentAppliedModelText)
+                    .textSelection(.enabled)
+            }
+            LabeledContent("Live") {
+                Text(vm.xcodeAgentLiveRouteText)
+                    .textSelection(.enabled)
+            }
+        }
+        .font(.caption)
+    }
+
+    private var agentLiveProofBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Last Xcode Agent Live Proof")
+                .font(.subheadline)
+            Text(vm.xcodeAgentLiveProofText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var agentVisibleModelsBlock: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Xcode-Visible Models Right Now")
+                    .font(.subheadline)
+                Spacer()
+                Button(vm.isRefreshingXcodeVisibleModels ? "Refreshing..." : "Refresh") {
+                    Task { await vm.refreshXcodeVisibleModels() }
+                }
+                .disabled(vm.isRefreshingXcodeVisibleModels)
+            }
+
+            LabeledContent("Source") {
+                Text(vm.xcodeVisibleModelsSourceText)
+            }
+            LabeledContent("Count") {
+                Text("\(vm.xcodeVisibleModelsSnapshot.modelIDs.count)")
+            }
+            LabeledContent("Checked") {
+                Text(vm.xcodeVisibleModelsTimestampText)
+            }
+            Text(vm.xcodeVisibleModelsStatusText)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(vm.xcodeVisibleModelsListText)
+                .font(.system(.caption2, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .font(.caption)
+    }
+
+    private var agentRoutingVerificationBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Verify Xcode Agent Routing (Terminal)")
+                    .font(.subheadline)
+                Spacer()
+                Button("Copy Commands") {
+                    copyRoutingVerificationCommands()
+                }
+            }
+
+            Text("Run the first command in one terminal tab, then run the two `rg` commands after one Xcode Agent request.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text(routingVerificationCommands)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            if routingVerificationCopied {
+                Text("Copied verification commands.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
 
     private var keysTab: some View {
         Form {

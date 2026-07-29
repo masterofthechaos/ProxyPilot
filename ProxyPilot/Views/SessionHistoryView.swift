@@ -187,7 +187,7 @@ struct SessionHistoryView: View {
             set: { selectedSessionID = $0 }
         )) {
             ForEach(vm.sessionHistorySessions) { session in
-                Text("\(session.source.uppercased()) - \(session.requestCount) req - \(sessionTokenSummary(session))")
+                Text("\(session.sourceLabel) - \(session.requestCount) req - \(sessionTokenSummary(session))")
                     .tag(Optional(session.id))
             }
         }
@@ -467,7 +467,7 @@ struct SessionHistoryView: View {
                     .font(.title3.weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                sourceBadge(session.source)
+                sourceBadge(session.sourceLabel)
             }
 
             Text(session.id)
@@ -572,7 +572,7 @@ struct SessionHistoryView: View {
                     .truncationMode(.middle)
 
                 HStack {
-                    Text(session.source.isEmpty ? "(unknown source)" : session.source.uppercased())
+                    Text(session.source.isEmpty ? "(unknown source)" : (session.source.caseInsensitiveCompare("repogps") == .orderedSame ? "RepoGPS" : session.source.uppercased()))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.accentColor)
                     Spacer()
@@ -1337,7 +1337,7 @@ struct SessionHistoryView: View {
     }
 
     private func sessionTitle(_ session: SessionHistorySession) -> String {
-        "\(session.source.uppercased()) Session"
+        session.isRepoGPS ? "RepoGPS Run" : "\(session.sourceLabel) Session"
     }
 
     private func sessionTimeRange(_ session: SessionHistorySession) -> String {

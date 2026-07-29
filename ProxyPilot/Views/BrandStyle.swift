@@ -33,13 +33,24 @@ struct ProxyPilotBrandMark: View {
 }
 
 /// Two soft radial washes anchored at opposite corners, tinted with the brand palette.
-/// Opacity is tuned down sharply in light mode, where tinted color reads much more
-/// readily against a white base than it does against a dark one.
+/// Light mode needs *more* of the wash, not less: a light tint over a white base has
+/// far less contrast to work with than the same tint over a dark one, so it needs both
+/// a higher opacity and a deeper hue to register at all. The pink reads as brand color
+/// against the dark base but washes out to grey against white, so light mode swaps it
+/// for the palette's violet.
 private struct ProxyPilotAmbientBackground: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
 
     private var washOpacity: Double {
-        colorScheme == .dark ? 0.14 : 0.05
+        colorScheme == .dark ? 0.14 : 0.18
+    }
+
+    private var topTrailingTint: Color {
+        colorScheme == .dark ? ProxyPilotBrandPalette.pink : ProxyPilotBrandPalette.violet
+    }
+
+    private var bottomLeadingTint: Color {
+        ProxyPilotBrandPalette.blueViolet
     }
 
     func body(content: Content) -> some View {
@@ -48,14 +59,14 @@ private struct ProxyPilotAmbientBackground: ViewModifier {
                 Color(nsColor: .windowBackgroundColor)
 
                 RadialGradient(
-                    colors: [ProxyPilotBrandPalette.pink.opacity(washOpacity), .clear],
+                    colors: [topTrailingTint.opacity(washOpacity), .clear],
                     center: .topTrailing,
                     startRadius: 0,
                     endRadius: 480
                 )
 
                 RadialGradient(
-                    colors: [ProxyPilotBrandPalette.blueViolet.opacity(washOpacity), .clear],
+                    colors: [bottomLeadingTint.opacity(washOpacity), .clear],
                     center: .bottomLeading,
                     startRadius: 0,
                     endRadius: 480

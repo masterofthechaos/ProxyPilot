@@ -29,6 +29,7 @@ enum MCPServerSetup {
         func isRunning() -> Bool { server != nil }
         func currentPort() -> UInt16? { boundPort }
         func currentProvider() -> String? { config?.upstreamProvider.rawValue }
+        func currentConfiguration() -> ProxyConfiguration? { config }
         func currentModel() -> String? {
             let m = config?.preferredAnthropicUpstreamModel ?? ""
             return m.isEmpty ? nil : m
@@ -60,11 +61,13 @@ enum MCPServerSetup {
     // MARK: - JSON Schema helpers (Value-based)
 
     /// Build a JSON Schema object with properties, as a Value.
-    private static func jsonSchemaObject(properties: [String: Value]) -> Value {
-        .object([
+    private static func jsonSchemaObject(properties: [String: Value], required: [String] = []) -> Value {
+        var schema: [String: Value] = [
             "type": .string("object"),
             "properties": .object(properties),
-        ])
+        ]
+        if !required.isEmpty { schema["required"] = .array(required.map(Value.string)) }
+        return .object(schema)
     }
 
     /// An empty JSON Schema object.
@@ -260,6 +263,17 @@ enum MCPServerSetup {
                         idempotentHint: false,
                         openWorldHint: true
                     )
+                ),
+                Tool(
+                    name: "proxy_route_set",
+                    title: "Set Active Route",
+                    description: "Transactionally select a ProxyPilot provider/model route for an active RepoGPS session. The downstream model remains proxypilot-active.",
+                    inputSchema: jsonSchemaObject(properties: [
+                        "port": intProp("Port to listen on (default 4000)"),
+                        "provider": stringProp("Required upstream provider ID"),
+                        "model": stringProp("Required upstream model ID"),
+                    ], required: ["provider", "model"]),
+                    annotations: .init(readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true)
                 ),
                 Tool(
                     name: "proxy_status",
@@ -665,6 +679,10 @@ enum MCPServerSetup {
                 await state.sessionStats.reset(clearReportStore: false)
                 let modelList = resolvedModels.models
                 let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
+                // Resolved per request, not frozen here: enabling MCP capture
+                // while the proxy is already running must take effect without a
+                // restart.
+                let inputOutputLoggerCache = InputOutputLoggerSessionCache()
                 let config = ProxyConfiguration(
                     port: reqPort,
                     upstreamProvider: upstream,
@@ -674,7 +692,7 @@ enum MCPServerSetup {
                     preferredAnthropicUpstreamModel: modelList.first ?? "",
                     sessionStats: state.sessionStats,
                     googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
-                    inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID),
+                    inputOutputLoggerProvider: inputOutputLoggerCache.provider(source: "mcp", sessionID: state.sessionID),
                     promptCaching: reqPromptCaching.configuration,
                     contextCompaction: contextCompaction.configuration()
                 )
@@ -738,27 +756,31 @@ enum MCPServerSetup {
                     return toolError(tool: "proxy_stop", code: "E011", message: "Failed to stop: \(error)")
                 }
 
-            case "proxy_restart":
-                let parsedPort = portArgument(params.arguments, default: port, tool: "proxy_restart")
+            case "proxy_restart", "proxy_route_set":
+                let routeTool = params.name == "proxy_route_set" ? "proxy_route_set" : "proxy_restart"
+                let parsedPort = portArgument(params.arguments, default: port, tool: routeTool)
                 if let error = parsedPort.error { return error }
                 let reqPort = parsedPort.port ?? port
                 let parsedProvider = MCPArgumentValidator.optionalProvider(params.arguments?["provider"], tool: "proxy_restart")
-                let parsedKey = stringArgument(params.arguments, name: "key", default: key, tool: "proxy_restart")
+                let parsedKey = stringArgument(params.arguments, name: "key", default: key, tool: routeTool)
                 if let error = parsedKey.error { return error }
-                let parsedURL = stringArgument(params.arguments, name: "url", default: upstreamURL, tool: "proxy_restart")
+                let parsedURL = stringArgument(params.arguments, name: "url", default: upstreamURL, tool: routeTool)
                 if let error = parsedURL.error { return error }
-                let parsedModel = stringArgument(params.arguments, name: "model", default: nil, tool: "proxy_restart")
+                let parsedModel = stringArgument(params.arguments, name: "model", default: nil, tool: routeTool)
                 if let error = parsedModel.error { return error }
                 let parsedPromptCaching = promptCachingArgument(
                     params.arguments?["prompt_caching"],
                     default: promptCaching,
-                    tool: "proxy_restart"
+                    tool: routeTool
                 )
                 if let error = parsedPromptCaching.error { return error }
                 let reqKey = parsedKey.value
                 let reqURL = parsedURL.value
                 let reqModel = parsedModel.value
                 let reqPromptCaching = parsedPromptCaching.value
+                if routeTool == "proxy_route_set", reqModel == nil {
+                    return toolError(tool: routeTool, code: "E049", message: "model is required")
+                }
 
                 let requestedProvider: UpstreamProvider?
                 switch parsedProvider {
@@ -766,7 +788,7 @@ enum MCPServerSetup {
                     requestedProvider = upstream
                 case .failure(_, let message):
                     return toolError(
-                        tool: "proxy_restart",
+                        tool: routeTool,
                         code: "E001",
                         message: message,
                         suggestion: "Valid providers: \(UpstreamProvider.cliOptionsDescription)"
@@ -776,7 +798,7 @@ enum MCPServerSetup {
                 let currentProvider = await state.currentProvider()
                 let secrets = SecretsProviderFactory.make()
                 let resolvedCredential = resolveMCPProviderCredential(
-                    tool: "proxy_restart",
+                    tool: routeTool,
                     rawProvider: requestedProvider?.rawValue ?? provider ?? currentProvider,
                     explicitKey: reqKey,
                     upstreamURL: reqURL,
@@ -789,7 +811,7 @@ enum MCPServerSetup {
                 }
                 guard let credential = resolvedCredential.credential else {
                     return toolError(
-                        tool: "proxy_restart",
+                        tool: routeTool,
                         code: "E047",
                         message: "Choose which configured provider ProxyPilot should use."
                     )
@@ -798,7 +820,7 @@ enum MCPServerSetup {
                 let apiKey = credential.apiKey
 
                 let modelResolution = await resolveProxyModelList(
-                    tool: "proxy_restart",
+                    tool: routeTool,
                     rawModels: reqModel,
                     provider: upstream,
                     upstreamURL: reqURL,
@@ -809,7 +831,7 @@ enum MCPServerSetup {
                 }
                 guard let resolvedModels = modelResolution.resolution else {
                     return toolError(
-                        tool: "proxy_restart",
+                        tool: routeTool,
                         code: "E049",
                         message: "No models could be resolved for \(upstream.rawValue)."
                     )
@@ -817,6 +839,10 @@ enum MCPServerSetup {
 
                 let modelList = resolvedModels.models
                 let allowedModels: Set<String> = modelList.isEmpty ? [] : Set(modelList)
+                // Resolved per request, not frozen here: enabling MCP capture
+                // while the proxy is already running must take effect without a
+                // restart.
+                let inputOutputLoggerCache = InputOutputLoggerSessionCache()
                 let config = ProxyConfiguration(
                     port: reqPort,
                     upstreamProvider: upstream,
@@ -826,21 +852,30 @@ enum MCPServerSetup {
                     preferredAnthropicUpstreamModel: modelList.first ?? "",
                     sessionStats: state.sessionStats,
                     googleThoughtSignatureStore: upstream == .google ? GoogleThoughtSignatureStore() : nil,
-                    inputOutputLogger: try? InputOutputLoggingRecorder.productionIfConfigured(source: "mcp", sessionID: state.sessionID),
+                    inputOutputLoggerProvider: inputOutputLoggerCache.provider(source: "mcp", sessionID: state.sessionID),
                     promptCaching: reqPromptCaching.configuration,
                     contextCompaction: contextCompaction.configuration()
                 )
 
                 do {
                     return try await lifecycleGate.withLock {
+                        let previousConfig = await state.currentConfiguration()
                         // Stop if running (ignore error if not running)
                         try? await state.stop()
-                        let boundPort = try await state.start(config: config)
+                        let boundPort: UInt16
+                        do {
+                            boundPort = try await state.start(config: config)
+                        } catch {
+                            if let previousConfig {
+                                _ = try? await state.start(config: previousConfig)
+                            }
+                            throw error
+                        }
                         let modelInfo = reqModel.map { " [\($0)]" }
                             ?? (resolvedModels.wasDiscoveredFromUpstream ? " [\(modelList.count) discovered model(s)]" : "")
                         let selectionInfo = credential.selectedFromStoredCredentials ? " (selected from stored provider keys)" : ""
                         return toolSuccess(
-                            tool: "proxy_restart",
+                            tool: routeTool,
                             data: ProxyLifecyclePayload(
                                 status: "restarted",
                                 port: Int(boundPort),
@@ -853,7 +888,7 @@ enum MCPServerSetup {
                     }
                 } catch {
                     return toolError(
-                        tool: "proxy_restart",
+                        tool: routeTool,
                         code: "E003",
                         message: "Failed to restart: \(error).",
                         suggestion: CLIProxyRuntime.bindFailureSuggestion(port: reqPort, error: error)
@@ -1171,7 +1206,9 @@ enum MCPServerSetup {
                 let sessionEvents = (try? SessionReportStore.readEvents()) ?? []
 
                 if let sessionID = sessionIDArgument.value {
-                    let matching = sessionEvents.filter { $0.sessionID == sessionID }
+                    // Case-insensitive: stored IDs are mixed-case (daemon vs.
+                    // attributed sessions), same as `sessions show`.
+                    let matching = sessionEvents.filter { $0.sessionID.caseInsensitiveCompare(sessionID) == .orderedSame }
                     guard let summary = SessionSummaryPayload.build(from: matching).first else {
                         return toolError(
                             tool: "get_session_history",

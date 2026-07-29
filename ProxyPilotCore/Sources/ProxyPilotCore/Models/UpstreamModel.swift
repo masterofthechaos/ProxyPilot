@@ -7,6 +7,10 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
     public let completionPricePer1M: Double?
     public let promptCacheHitPricePer1M: Double?
     public let promptCacheMissPricePer1M: Double?
+    /// Price of *writing* tokens into the provider's prompt cache. Distinct from the
+    /// hit/miss pair: providers that charge a premium for cache creation bill these
+    /// tokens once, on top of the uncached input they also count.
+    public let promptCacheWritePricePer1M: Double?
     public let supportedParameters: Set<String>
 
     public init(
@@ -16,6 +20,7 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
         completionPricePer1M: Double?,
         promptCacheHitPricePer1M: Double? = nil,
         promptCacheMissPricePer1M: Double? = nil,
+        promptCacheWritePricePer1M: Double? = nil,
         supportedParameters: Set<String> = []
     ) {
         self.id = id
@@ -24,6 +29,7 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
         self.completionPricePer1M = completionPricePer1M
         self.promptCacheHitPricePer1M = promptCacheHitPricePer1M
         self.promptCacheMissPricePer1M = promptCacheMissPricePer1M
+        self.promptCacheWritePricePer1M = promptCacheWritePricePer1M
         self.supportedParameters = supportedParameters
     }
 
@@ -55,6 +61,7 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
             completionPricePer1M: completionPricePer1M,
             promptCacheHitPricePer1M: promptCacheHitPricePer1M,
             promptCacheMissPricePer1M: promptCacheMissPricePer1M,
+            promptCacheWritePricePer1M: promptCacheWritePricePer1M,
             supportedParameters: supportedParameters
         )
     }
@@ -125,17 +132,24 @@ public struct UpstreamModel: Identifiable, Hashable, Sendable, Codable {
         promptTokens: Int,
         completionTokens: Int,
         promptCacheHitTokens: Int?,
-        promptCacheMissTokens: Int?
+        promptCacheMissTokens: Int?,
+        promptCacheWriteTokens: Int? = nil
     ) -> Double? {
         if let promptCacheHitTokens, let promptCacheMissTokens,
            promptCacheHitPricePer1M != nil || promptCacheMissPricePer1M != nil {
             let sanitizedHitTokens = max(promptCacheHitTokens, 0)
             let sanitizedMissTokens = max(promptCacheMissTokens, 0)
+            let sanitizedWriteTokens = max(promptCacheWriteTokens ?? 0, 0)
             let sanitizedCompletionTokens = max(completionTokens, 0)
             let hitCost = (Double(sanitizedHitTokens) / 1_000_000) * (promptCacheHitPricePer1M ?? 0)
             let missCost = (Double(sanitizedMissTokens) / 1_000_000) * (promptCacheMissPricePer1M ?? promptPricePer1M ?? 0)
+            // Cache creation is billed on top of the uncached input it accompanies, so
+            // this is an additional term rather than a substitute for the miss cost.
+            // Providers that do not charge for cache writes report no price and it
+            // contributes nothing.
+            let writeCost = (Double(sanitizedWriteTokens) / 1_000_000) * (promptCacheWritePricePer1M ?? 0)
             let completionCost = (Double(sanitizedCompletionTokens) / 1_000_000) * (completionPricePer1M ?? 0)
-            return hitCost + missCost + completionCost
+            return hitCost + missCost + writeCost + completionCost
         }
 
         guard promptPricePer1M != nil || completionPricePer1M != nil else { return nil }

@@ -389,7 +389,10 @@ public actor InputOutputLogStore {
             }
             let decrypted = try decrypt(String(decoding: encrypted, as: UTF8.self))
             let record = try decoder.decode(InputOutputLogRecord.self, from: decrypted)
-            if record.sessionID == sessionID {
+            // Stored IDs are mixed-case (daemon sessions keep `UUID().uuidString`
+            // uppercase; attributed sessions are lowercased), so match
+            // case-insensitively rather than normalizing either side.
+            if record.sessionID?.caseInsensitiveCompare(sessionID) == .orderedSame {
                 matchingRecords.append(record)
             }
         }
@@ -489,6 +492,50 @@ public actor InputOutputLogStore {
         #else
         throw InputOutputLogStoreError.encryptionUnavailable
         #endif
+    }
+}
+
+/// Memoizes the session's `InputOutputLoggingRecorder` so every request shares
+/// one underlying store actor (serialized appends) while still resolving
+/// lazily: if logging is disabled when the proxy starts, each request re-checks
+/// the shared preferences until logging becomes effective, then caches the
+/// recorder for the rest of the session.
+///
+/// Used by every proxy entry point — GUI (`LocalProxyServer`), CLI (`start`,
+/// `serve`), and MCP — so enabling capture under a running proxy takes effect
+/// without a restart. Resolving once at start instead is the defect recorded in
+/// `docs/session-punch-cards/punch-outs/2026-07-08T21-53-57-0400-cli-io-log-session-mismatch.md`.
+public final class InputOutputLoggerSessionCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cached: InputOutputLoggingRecorder?
+
+    public init() {}
+
+    public func recorder(
+        source: String,
+        sessionID: String,
+        preferencesStore: InputOutputLoggingPreferencesStore = InputOutputLoggingPreferencesStore()
+    ) -> InputOutputLoggingRecorder? {
+        lock.lock()
+        defer { lock.unlock() }
+        if let cached { return cached }
+        cached = try? InputOutputLoggingRecorder.productionIfConfigured(
+            source: source,
+            sessionID: sessionID,
+            preferencesStore: preferencesStore
+        )
+        return cached
+    }
+
+    /// Provider closure suitable for `ProxyConfiguration.inputOutputLoggerProvider`.
+    public func provider(
+        source: String,
+        sessionID: String,
+        preferencesStore: InputOutputLoggingPreferencesStore = InputOutputLoggingPreferencesStore()
+    ) -> @Sendable () -> InputOutputLoggingRecorder? {
+        { [self] in
+            recorder(source: source, sessionID: sessionID, preferencesStore: preferencesStore)
+        }
     }
 }
 
@@ -630,11 +677,17 @@ public struct InputOutputLoggingRecorder: Sendable {
         let preferences = try preferencesStore.load()
         guard preferences.isEffective(for: source) else { return }
 
+        // Attributed requests (X-ProxyPilot-Client/-Session-ID) file under the
+        // caller's session, exactly as SessionStats.record does for session
+        // reports. Without this, every record lands in the proxy's own startup
+        // session and `sessions show <agent-session> --include-logs` finds
+        // nothing.
+        let attribution = RequestAttributionContext.current
         let recordedOutput: InputOutputLogContent? = preferences.recordOutputs ? .fromBody(outputBody) : nil
         let record = InputOutputLogRecord(
             timestamp: startedAt,
-            source: source,
-            sessionID: sessionID,
+            source: attribution?.client ?? source,
+            sessionID: attribution?.sessionID ?? sessionID,
             path: path,
             model: {
                 let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

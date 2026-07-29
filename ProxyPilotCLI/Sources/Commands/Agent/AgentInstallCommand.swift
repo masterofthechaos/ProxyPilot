@@ -18,7 +18,10 @@ struct AgentInstallCommand: AsyncParsableCommand {
             OutputFormatter.error(
                 command: "agent install",
                 code: "E054",
-                message: "ProxyPilot Agent requires macOS 27 or newer and Xcode 27 or newer.",
+                // Xcode-version gated only: Agent Modes is an Xcode feature, and Xcode 27
+                // betas run on the prior macOS. The macOS floor was removed in v1.11.8
+                // (see AgentModesCapabilityPolicy); this message outlived it.
+                message: "ProxyPilot Agent requires Xcode 27 or newer.",
                 suggestion: "Continue using Claude Agent routing on this Mac.",
                 json: json
             )

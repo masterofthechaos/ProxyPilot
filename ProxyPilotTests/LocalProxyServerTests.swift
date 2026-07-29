@@ -779,11 +779,12 @@ final class LocalProxyServerTests: XCTestCase {
         let payload = H.buildModelsPayload(allowedModels: ["model-b", "model-a"], timestamp: 1000)
         XCTAssertEqual(payload["object"] as? String, "list")
         let data = try XCTUnwrap(payload["data"] as? [[String: Any]])
-        XCTAssertEqual(data.count, 2)
+        XCTAssertEqual(data.count, 3)
 
         // Sorted: model-a first
         XCTAssertEqual(data[0]["id"] as? String, "model-a")
         XCTAssertEqual(data[1]["id"] as? String, "model-b")
+        XCTAssertEqual(data[2]["id"] as? String, ActiveModelAlias.id)
 
         // Each model has expected fields
         let first = data[0]

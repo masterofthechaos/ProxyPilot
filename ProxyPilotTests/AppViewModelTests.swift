@@ -200,6 +200,43 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(relaunched.selectedAgentMode, .proxyPilotAgent)
     }
 
+    func testAgentModelSelectionIsSharedAcrossBothAgentModes() {
+        // Parity pin: there is no separate ProxyPilot-Agent model state. Both modes are
+        // routed by the same effectiveXcodeAgentModel, so a model chosen in one mode
+        // must survive a switch to the other. If this ever diverges, the two cards need
+        // separate pickers rather than the shared one they render today.
+        let vm = AppViewModel(defaults: defaults)
+        vm.selectedAgentMode = .claudeAgent
+        vm.selectedXcodeAgentModel = "google/gemini-3.5-flash"
+
+        vm.selectedAgentMode = .proxyPilotAgent
+        XCTAssertEqual(vm.selectedXcodeAgentModel, "google/gemini-3.5-flash")
+        XCTAssertEqual(vm.effectiveXcodeAgentModel, "google/gemini-3.5-flash")
+
+        vm.selectedXcodeAgentModel = "anthropic/claude-opus-5"
+        vm.selectedAgentMode = .claudeAgent
+        XCTAssertEqual(vm.selectedXcodeAgentModel, "anthropic/claude-opus-5")
+    }
+
+    func testAgentRouteScopeNoteWarnsAboutLaunchTimeHintOnlyInProxyPilotAgentMode() {
+        // The ProxyPilot Agent launcher bakes ANTHROPIC_MODEL at exec time, so a running
+        // agent session keeps its launch-time model even after the proxy moves on. The
+        // Claude path has no such session-scoped hint and must not claim one.
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.selectedAgentMode = .claudeAgent
+        XCTAssertFalse(vm.xcodeAgentRouteScopeNote.contains("already running"))
+
+        vm.selectedAgentMode = .proxyPilotAgent
+        if vm.showsAgentModeChoice {
+            XCTAssertTrue(vm.xcodeAgentRouteScopeNote.contains("already running"))
+        } else {
+            // No qualifying Xcode on this host: the mode choice is hidden, so the note
+            // correctly stays on the Claude wording regardless of the stored selection.
+            XCTAssertFalse(vm.xcodeAgentRouteScopeNote.contains("already running"))
+        }
+    }
+
     func testAgentRuntimeRefreshReportsNotInstalledForEmptyManagedRoot() async {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("proxypilot-agent-vm-tests-\(UUID().uuidString)")

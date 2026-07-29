@@ -235,14 +235,26 @@ struct HomeDashboardView: View {
 
                 ViewThatFits {
                     HStack(spacing: 12) {
-                        proxyPilotAgentButtonGroup
+                        agentModelPicker
                         Spacer()
+                        proxyPilotAgentButtonGroup
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
+                        agentModelPicker
                         proxyPilotAgentButtonGroup
                     }
                 }
+
+                // Same proxy-side route state the Claude Agent card shows — both modes
+                // are remapped by the same running proxy, so this is not mode-specific.
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Applied: \(vm.xcodeAgentAppliedModelText)")
+                    Text("Live: \(vm.xcodeAgentLiveRouteText)")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
 
                 Button { onOpenProxy() } label: {
                     Text("Full setup and verification in **Proxy**.")

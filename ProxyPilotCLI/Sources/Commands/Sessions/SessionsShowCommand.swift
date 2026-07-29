@@ -19,7 +19,10 @@ struct SessionsShowCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         let events = (try? SessionReportStore.readEvents()) ?? []
-        let matching = events.filter { $0.sessionID == sessionID }
+        // Stored IDs are mixed-case (daemon vs. attributed sessions), so match
+        // case-insensitively — `sessions show` should accept the ID however the
+        // caller's tool reported it.
+        let matching = events.filter { $0.sessionID.caseInsensitiveCompare(sessionID) == .orderedSame }
 
         guard let summary = SessionSummaryPayload.build(from: matching).first else {
             OutputFormatter.error(

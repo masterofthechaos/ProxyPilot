@@ -279,6 +279,84 @@ final class InputOutputLoggingStoreTests: XCTestCase {
             decoded.map { $0.input?.text },
             ["target older prompt", "target newer prompt"]
         )
+
+        // Stored IDs are mixed-case (daemon sessions keep `UUID().uuidString`
+        // uppercase; attributed sessions are lowercased), so lookups must not
+        // care about case.
+        let caseInsensitive = try await store.readRecords(matchingSessionID: "TARGET")
+        XCTAssertEqual(caseInsensitive.count, 2)
+    }
+
+    func testRecordFilesUnderRequestAttributionSessionNotRecorderSession() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let preferencesURL = directory.appendingPathComponent("settings.json")
+        let logURL = directory.appendingPathComponent("records.jsonl.enc")
+        let preferencesStore = InputOutputLoggingPreferencesStore(url: preferencesURL)
+        try preferencesStore.save(InputOutputLoggingPreferences(
+            enabled: true,
+            recordInputs: true,
+            recordOutputs: true,
+            cliEnabled: true,
+            retention: .twentyFourHoursDefault
+        ))
+
+        let daemonSessionID = UUID().uuidString // uppercase, as ProxyConfiguration defaults
+        let recorder = InputOutputLoggingRecorder(
+            source: "cli",
+            sessionID: daemonSessionID,
+            preferencesStore: preferencesStore,
+            logStore: InputOutputLogStore(
+                url: logURL,
+                encryptionKey: Data(repeating: 9, count: 32)
+            )
+        )
+
+        // An attributed request (X-ProxyPilot-Client/-Session-ID) must file
+        // under the caller's session, mirroring SessionStats.record. Before the
+        // fix every record carried the daemon's own session ID, so
+        // `sessions show <agent-session> --include-logs` returned 0 records for
+        // sessions whose reports attributed correctly.
+        let attribution = try XCTUnwrap(RequestAttribution.validated(
+            client: "repogps",
+            sessionID: "5A01889E-762F-477B-BFB2-17F5DA3EE310"
+        ))
+        try await RequestAttributionContext.$current.withValue(attribution) {
+            try await recorder.record(
+                path: "/v1/chat/completions",
+                model: "glm-5",
+                provider: "zai",
+                wasStreaming: true,
+                statusCode: 200,
+                startedAt: Date(timeIntervalSince1970: 100),
+                inputBody: Data("attributed prompt".utf8),
+                outputBody: Data("attributed output".utf8)
+            )
+        }
+
+        // An unattributed request keeps the recorder's own session.
+        try await recorder.record(
+            path: "/v1/messages",
+            model: "glm-5",
+            provider: "zai",
+            wasStreaming: false,
+            statusCode: 200,
+            startedAt: Date(timeIntervalSince1970: 200),
+            inputBody: Data("daemon prompt".utf8),
+            outputBody: Data("daemon output".utf8)
+        )
+
+        let attributed = try await recorder.readRecords(
+            matchingSessionID: "5a01889e-762f-477b-bfb2-17f5da3ee310"
+        )
+        XCTAssertEqual(attributed.count, 1)
+        XCTAssertEqual(attributed.first?.source, "repogps")
+        XCTAssertEqual(attributed.first?.input?.text, "attributed prompt")
+
+        let daemon = try await recorder.readRecords(matchingSessionID: daemonSessionID)
+        XCTAssertEqual(daemon.count, 1)
+        XCTAssertEqual(daemon.first?.source, "cli")
+        XCTAssertEqual(daemon.first?.input?.text, "daemon prompt")
     }
 
     func testRecordWithoutOutputTruncatedFieldDecodesAsNilForBackwardCompat() throws {
@@ -684,6 +762,83 @@ final class InputOutputLoggingStoreTests: XCTestCase {
         XCTAssertEqual(records.count, 1)
         XCTAssertEqual(records[0].input?.text, "prompt")
         XCTAssertNil(records[0].output)
+    }
+
+    /// Regression: the CLI/MCP proxy entry points used to resolve the recorder
+    /// once at daemon start and freeze it into `ProxyConfiguration`, so enabling
+    /// capture under a running daemon could never attach a recorder — the defect
+    /// recorded in the 2026-07-08 and 2026-07-14 punch-outs. `inputOutputLogger`
+    /// must now resolve through the provider on every access.
+    func testConfigurationResolvesInputOutputLoggerOnEveryAccess() throws {
+        final class ProviderState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var recorder: InputOutputLoggingRecorder?
+            private(set) var callCount = 0
+
+            func resolve() -> InputOutputLoggingRecorder? {
+                lock.lock()
+                defer { lock.unlock() }
+                callCount += 1
+                return recorder
+            }
+
+            func enable(_ recorder: InputOutputLoggingRecorder) {
+                lock.lock()
+                defer { lock.unlock() }
+                self.recorder = recorder
+            }
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let preferencesStore = InputOutputLoggingPreferencesStore(
+            url: directory.appendingPathComponent("settings.json")
+        )
+        let recorder = InputOutputLoggingRecorder(
+            source: "cli",
+            preferencesStore: preferencesStore,
+            logStore: InputOutputLogStore(
+                url: directory.appendingPathComponent("records.jsonl.enc"),
+                encryptionKey: Data(repeating: 7, count: 32)
+            )
+        )
+
+        let state = ProviderState()
+        let config = ProxyConfiguration(inputOutputLoggerProvider: { state.resolve() })
+
+        // Capture is off when the proxy starts: no recorder.
+        XCTAssertNil(config.inputOutputLogger)
+        XCTAssertEqual(state.callCount, 1)
+
+        // Capture is enabled mid-session, without restarting the proxy.
+        state.enable(recorder)
+
+        XCTAssertNotNil(config.inputOutputLogger)
+        XCTAssertEqual(state.callCount, 2, "Provider must be consulted per access, not memoized by the configuration.")
+    }
+
+    /// The convenience initializer that takes an already-resolved recorder must
+    /// keep returning that same recorder (constant provider, no live pickup).
+    func testConfigurationWithResolvedRecorderKeepsReturningIt() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let recorder = InputOutputLoggingRecorder(
+            source: "cli",
+            preferencesStore: InputOutputLoggingPreferencesStore(
+                url: directory.appendingPathComponent("settings.json")
+            ),
+            logStore: InputOutputLogStore(
+                url: directory.appendingPathComponent("records.jsonl.enc"),
+                encryptionKey: Data(repeating: 9, count: 32)
+            )
+        )
+
+        let config = ProxyConfiguration(inputOutputLogger: recorder)
+        XCTAssertNotNil(config.inputOutputLogger)
+        XCTAssertNotNil(config.inputOutputLogger)
+
+        let none = ProxyConfiguration(inputOutputLogger: nil)
+        XCTAssertNil(none.inputOutputLogger)
     }
 
     private func filePermissions(at url: URL) throws -> Int {

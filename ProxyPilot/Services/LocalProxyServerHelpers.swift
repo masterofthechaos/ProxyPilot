@@ -294,7 +294,7 @@ enum LocalProxyServerHelpers {
 
     /// Build the JSON payload for GET /v1/models without depending on NWConnection.
     static func buildModelsPayload(allowedModels: Set<String>, timestamp: Int) -> [String: Any] {
-        let models = allowedModels.sorted()
+        let models = allowedModels.union(allowedModels.isEmpty ? [] : [ActiveModelAlias.id]).sorted()
         let data: [[String: Any]] = models.map { id in
             [
                 "id": id,
@@ -331,7 +331,7 @@ enum LocalProxyServerHelpers {
               let model = json["model"] as? String else {
             return true // can't parse → let the upstream decide
         }
-        return allowedModels.contains(model)
+        return ActiveModelAlias.accepts(model, allowedModels: allowedModels)
     }
 
     // MARK: - Error Response JSON Builders
