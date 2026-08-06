@@ -131,7 +131,9 @@ struct CustomizationView: View {
                 get: { vm.defaultSettingsSection },
                 set: { vm.defaultSettingsSection = $0 }
             )) {
-                ForEach(SettingsSection.sidebarSections) { section in
+                ForEach(SettingsSection.availableSidebarSections(
+                    repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
+                )) { section in
                     Text(section.title).tag(section)
                 }
             }
@@ -235,7 +237,9 @@ struct CustomizationView: View {
                     }
                 }
 
-                ForEach(vm.menuBarSectionOrder) { section in
+                ForEach(vm.menuBarSectionOrder.filter {
+                    vm.repoGPSRoutingFeatureEnabled || $0 != .repoGPSRoute
+                }) { section in
                     menuBarSectionRow(section)
                 }
 

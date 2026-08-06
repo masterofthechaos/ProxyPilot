@@ -113,6 +113,15 @@ final class AppViewModel: ObservableObject {
     let proxyLifecycle: ProxyLifecycleManager
     let customProviderStorage: CustomProviderStorage
 
+    /// The one route reader every surface shares.
+    ///
+    /// `RoutingView` and `MenuBarView` each held their own `@StateObject`, which
+    /// worked for them and left Home with none — so Home had no way to know what
+    /// a CLI daemon was serving and fell back to the GUI's Xcode selection. Two
+    /// independent readers of the same `route.json` is also just a second source
+    /// of truth waiting to disagree with the first.
+    let routeControl = RouteControlService()
+
     private let defaults: UserDefaults
     private let proxyService: ProxyService
     private let localProxyServer: LocalProxyServer
@@ -184,6 +193,14 @@ final class AppViewModel: ObservableObject {
 
     private var providerManagerCancellable: AnyCancellable?
     private var lifecycleManagerCancellable: AnyCancellable?
+    private var routeControlCancellable: AnyCancellable?
+    /// Throttles the route poll. `RouteControlService.refresh()` spawns two
+    /// short-lived processes, and the value it reads only changes when someone
+    /// runs `route set` — so polling it on the 10s status timer would be two
+    /// process spawns every ten seconds to observe something that changes by
+    /// the hour. The live-updating half of the serving identity comes from
+    /// observed traffic, which needs no subprocess at all.
+    private var lastRouteControlRefresh: Date?
     private var logRefreshTimer: Timer?
     private var statusAutoRefreshTimer: Timer?
     private var statusRefreshSequence = 0
@@ -469,6 +486,7 @@ final class AppViewModel: ObservableObject {
     @Published var xcodeInstallations: [XcodeInstallation] = []
     var hasCompatibleXcode: Bool { xcodeInstallations.contains { $0.supportsAgenticCoding } }
     @Published private(set) var agentModesCapability = XcodeDetectionService.agentModesCapability(for: [])
+    let repoGPSRoutingFeatureEnabled = RepoGPSRoutingFeatureFlag.current
     @Published private(set) var agentRuntimeStatus: AgentRuntimeStatus = .notInstalled
     @Published private(set) var proxyPilotAgentRegistrationStatus: ACPRegistrationManager.Status?
     @Published private(set) var proxyPilotAgentStatusText = "Not installed"
@@ -587,7 +605,26 @@ final class AppViewModel: ObservableObject {
         guard let stored = defaults.stringArray(forKey: visibleMenuBarSectionsDefaultsKey) else {
             return Set(MenuBarSection.defaultOrder)
         }
-        return Set(stored.compactMap(MenuBarSection.init(rawValue:)))
+        var visible = Set(stored.compactMap(MenuBarSection.init(rawValue:)))
+
+        // A section missing from the stored *order* did not exist when these
+        // preferences were written, so the user has never been offered the
+        // chance to hide it. Default those to visible.
+        //
+        // Without this, every section added after a user customizes their menu
+        // bar is invisible to exactly the users who customize — the visible set
+        // is stored as an explicit allowlist, so a new case is absent from it
+        // and silently never renders. Hiding stays intact because a section the
+        // user actually hid is still present in the stored order; that is what
+        // keeps "deliberately hidden" and "did not exist yet" distinguishable.
+        let storedOrder = Set(
+            (defaults.stringArray(forKey: menuBarSectionOrderDefaultsKey) ?? [])
+                .compactMap(MenuBarSection.init(rawValue:))
+        )
+        if !storedOrder.isEmpty {
+            visible.formUnion(MenuBarSection.allCases.filter { !storedOrder.contains($0) })
+        }
+        return visible
     }
 
     static func decodedVisibleHomeDashboardSections(from defaults: UserDefaults) -> Set<HomeDashboardSection> {
@@ -1871,11 +1908,148 @@ final class AppViewModel: ObservableObject {
         return active.caseInsensitiveCompare(selected) != .orderedSame
     }
 
+    // MARK: - Serving route identity
+
+    /// The model that actually went upstream, as opposed to one that is merely
+    /// configured. `lastUpstreamModelUsed` is the post-remap name and therefore
+    /// the real answer; `lastModelSeen` is the client's requested name, which
+    /// for RepoGPS is the opaque `proxypilot-active` alias until the CLI session
+    /// import replaces it with the concrete model the daemon recorded.
+    var observedUpstreamModel: String? {
+        let upstream = localProxyServer.state.lastUpstreamModelUsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !upstream.isEmpty { return upstream }
+        let seen = localProxyServer.state.lastModelSeen.trimmingCharacters(in: .whitespacesAndNewlines)
+        return seen.isEmpty ? nil : seen
+    }
+
+    /// Identity of the route that produced the traffic the Home card is showing.
+    ///
+    /// Every metric on that card — requests, tokens, cache, cost, latency — is
+    /// observed traffic, so its provider and model must describe the same
+    /// traffic. They used to read `upstreamProviderDisplayTitle` and
+    /// `effectiveXcodeAgentModel`, which are the GUI's *configured Xcode* route.
+    /// Whenever a CLI daemon owns the proxy those describe a different route
+    /// entirely, and the card reported RepoGPS request counts beside the Xcode
+    /// model name. The provider agreed only by coincidence, because both routes
+    /// happened to point at OpenRouter.
+    ///
+    /// `nil` when nothing is serving — there is no honest identity to show for a
+    /// stopped proxy, and inventing one is how the original defect started.
+    struct ServingRoute: Equatable {
+        enum Owner: Equatable {
+            /// The GUI's own `LocalProxyServer`, driven by the Xcode selection.
+            case app
+            /// A CLI daemon, driven by `route.json`. Serves RepoGPS.
+            case cli
+        }
+
+        var owner: Owner
+        var providerTitle: String
+        var model: String
+        /// True when `model` reflects what the running proxy is actually using
+        /// — traffic off the wire for a CLI daemon, the live start-time config
+        /// for the app's own proxy — rather than a selection not yet in effect.
+        /// A selection states an intention; the running proxy is evidence. They
+        /// diverge exactly when something is wrong, so the distinction is kept
+        /// rather than flattened.
+        var isModelObserved: Bool
+    }
+
+    var servingRoute: ServingRoute? {
+        switch proxyRuntimeStatus {
+        case .stopped, .portOccupied:
+            return nil
+
+        case .runningInApp:
+            // The GUI's own proxy. `activeXcodeAgentModel` is set from the
+            // config it was started with (`LocalProxyServer:247`) — the model it
+            // will actually remap to — so it is the live answer by construction
+            // and needs no traffic to have flowed.
+            //
+            // Deliberately *not* `observedUpstreamModel` here. That falls back
+            // to `lastModelSeen`, which is the **client-requested** name: for
+            // Xcode an Anthropic model id, set at `beginRequest` before the
+            // remap resolves. Preferring it would make this badge report what
+            // Xcode asked for instead of what ProxyPilot served — the same
+            // confusion this type exists to end, pointed the other way.
+            let active = activeXcodeAgentModel
+            let selected = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let model = active.isEmpty ? (selected.isEmpty ? nil : selected) : active else { return nil }
+            return ServingRoute(
+                owner: .app,
+                providerTitle: upstreamProviderDisplayTitle,
+                model: model,
+                isModelObserved: !active.isEmpty
+            )
+
+        case .runningExternal:
+            // A CLI daemon owns the port. `route.json` is what it was told to
+            // serve; observed traffic is what it did serve. Prefer the evidence.
+            let observed = observedUpstreamModel
+            let routeModel = routeControl.status.model?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let model = observed ?? routeModel.flatMap({ $0.isEmpty ? nil : $0 }) else { return nil }
+            return ServingRoute(
+                owner: .cli,
+                providerTitle: Self.routeProviderTitle(routeControl.status.provider),
+                model: model,
+                isModelObserved: observed != nil
+            )
+        }
+    }
+
+    /// Maps a `route.json` provider identifier to a display title. Falls back to
+    /// the raw identifier rather than to the GUI's configured provider — naming
+    /// the wrong provider confidently is worse than showing `openrouter` in
+    /// lowercase, and silently substituting the GUI's own selection here would
+    /// reintroduce the exact defect this type exists to fix.
+    static func routeProviderTitle(_ identifier: String?) -> String {
+        guard let identifier, !identifier.isEmpty else {
+            return String(localized: "Unknown provider")
+        }
+        return UpstreamProvider(rawValue: identifier)?.title ?? identifier
+    }
+
+    /// Badge text for the serving route: `provider / model`.
+    var servingRouteBadgeTitle: String? {
+        guard let route = servingRoute else { return nil }
+        return "\(route.providerTitle) / \(route.model)"
+    }
+
+    var servingRouteBadgeHelpText: String {
+        guard let route = servingRoute else {
+            return String(localized: "No proxy is serving. Start ProxyPilot, or run a CLI route, to see live route identity.")
+        }
+        let source = route.isModelObserved
+            ? String(localized: "Observed on the most recent request.")
+            : String(localized: "From the route configuration; no request has been served yet.")
+        switch route.owner {
+        case .app:
+            return String(localized: "The ProxyPilot-owned proxy is serving this route, from the Xcode selection.") + " " + source
+        case .cli:
+            return String(localized: "A CLI daemon owns the proxy and is serving this route from route.json. This is the RepoGPS route, not the Xcode one.") + " " + source
+        }
+    }
+
+    // MARK: - Xcode route badge
+
     var homeAgentModelBadgeTitle: String {
         if hasPendingXcodeAgentModelChange {
             return activeXcodeAgentModel
         }
         return effectiveXcodeAgentModel
+    }
+
+    /// Always names the route. An unqualified model name in a row of observed
+    /// traffic reads as "this is what served your requests", which is false the
+    /// moment a CLI daemon owns the proxy.
+    var homeAgentModelBadgeLabel: String {
+        String(localized: "Xcode") + ": " + homeAgentModelBadgeTitle
+    }
+
+    /// True when the Xcode selection is a selection only — nothing is serving it.
+    /// Drives the badge's de-emphasis so it cannot be mistaken for live state.
+    var isXcodeRouteIdle: Bool {
+        servingRoute?.owner != .app
     }
 
     var homeAgentModelBadgeHelpText: String {
@@ -1884,6 +2058,12 @@ final class AppViewModel: ObservableObject {
         }
         if proxyRuntimeStatus == .runningInApp || localProxyServer.state.isRunning {
             return "Live model for the running ProxyPilot-owned proxy."
+        }
+        // The branch that was missing, and the reason the badge could sit beside
+        // CLI traffic claiming to be live. `xcodeAgentRoutingSummaryText` has had
+        // this case since the Routing section shipped; this one did not.
+        if proxyRuntimeStatus == .runningExternal {
+            return String(localized: "Selected Xcode Agent model. The running proxy is CLI-owned and is not serving this route — the session metrics above are its traffic, not Xcode's.")
         }
         return "Selected Xcode Agent model. Start or restart ProxyPilot before treating it as live."
     }
@@ -2660,8 +2840,15 @@ final class AppViewModel: ObservableObject {
         ) ?? ProxyPilotAccentColor.defaultHex
         showMenuBarExtra = defaults.object(forKey: Self.showMenuBarExtraDefaultsKey) as? Bool ?? true
         runInBackground = defaults.bool(forKey: Self.runInBackgroundDefaultsKey)
-        menuBarSectionOrder = Self.decodedMenuBarSectionOrder(from: defaults)
-        visibleMenuBarSections = Self.decodedVisibleMenuBarSections(from: defaults)
+        // Both decode from the *stored* values before either is assigned.
+        // Assigning `menuBarSectionOrder` persists its normalized form, which
+        // backfills every known section — so decoding the visible set
+        // afterwards would see a complete order and never recognise a section
+        // as new. Reading both first keeps that signal intact.
+        let storedMenuBarOrder = Self.decodedMenuBarSectionOrder(from: defaults)
+        let storedVisibleMenuBarSections = Self.decodedVisibleMenuBarSections(from: defaults)
+        menuBarSectionOrder = storedMenuBarOrder
+        visibleMenuBarSections = storedVisibleMenuBarSections
         visibleHomeDashboardSections = Self.decodedVisibleHomeDashboardSections(from: defaults)
         defaultSettingsSection = SettingsSection(
             rawValue: defaults.string(forKey: Self.defaultSettingsSectionDefaultsKey) ?? ""
@@ -2736,6 +2923,15 @@ final class AppViewModel: ObservableObject {
 
         // Forward ProxyLifecycleManager changes → AppViewModel objectWillChange
         lifecycleManagerCancellable = proxyLifecycle.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+
+        // Forward RouteControlService changes → AppViewModel objectWillChange.
+        // Nested ObservableObjects do not propagate on their own, and every
+        // route-aware surface observes `vm` rather than the service directly.
+        routeControlCancellable = routeControl.objectWillChange
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
@@ -2837,6 +3033,27 @@ final class AppViewModel: ObservableObject {
         applyProxyRuntimeStatus(locallyRunning ? .runningInApp : .stopped)
         refreshLogText()
         Task { await refreshReachableProxyStatus(sequence: sequence, locallyRunning: locallyRunning) }
+        Task { await refreshRouteControlIfStale() }
+    }
+
+    /// Reloads the CLI route, at most once every 30 seconds.
+    ///
+    /// Only meaningful when the GUI does not own the proxy: if it does, the
+    /// serving route is the GUI's own and `route.json` has no bearing on what
+    /// Home shows. Skipping that case keeps the app from spawning subprocesses
+    /// on a timer for an answer it already has.
+    func refreshRouteControlIfStale(now: Date = Date(), minimumInterval: TimeInterval = 30) async {
+        guard proxyRuntimeStatus != .runningInApp else { return }
+        if let last = lastRouteControlRefresh, now.timeIntervalSince(last) < minimumInterval { return }
+        lastRouteControlRefresh = now
+        await routeControl.refresh()
+    }
+
+    /// Forces a route reload regardless of throttle — for explicit user intent
+    /// (opening a route surface, pressing Refresh) where staleness is visible.
+    func refreshRouteControlNow() async {
+        lastRouteControlRefresh = Date()
+        await routeControl.refresh()
     }
 
     func refreshAgentConfigInstallationState() {
@@ -4773,7 +4990,7 @@ final class AppViewModel: ObservableObject {
             return "Runtime ready, but Xcode points to a stale launcher path. Reinstall to repair it."
         case (.ready, _):
             return proxyPilotAgentUsesManualRegistration
-                ? "Runtime ready. Complete manual registration below."
+                ? "Runtime ready. Manual registration is required in Xcode."
                 : "Runtime ready but not registered with Xcode."
         case (.stale(let reason, _), _):
             return "Runtime update required: \(reason)"

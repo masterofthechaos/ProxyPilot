@@ -563,7 +563,12 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(relaunched.appearancePreference, .dark)
         XCTAssertEqual(relaunched.proxyPilotAccentHex, "#FF2D55")
         XCTAssertFalse(relaunched.showMenuBarExtra)
-        XCTAssertEqual(relaunched.menuBarSectionOrder, [.quickActions, .statusDetails, .updates, .modelPicker, .sessionStats])
+        // The stored order predates `.repoGPSRoute`, so normalization appends
+        // it rather than dropping a section the user has never seen.
+        XCTAssertEqual(relaunched.menuBarSectionOrder, [.quickActions, .statusDetails, .updates, .modelPicker, .sessionStats, .repoGPSRoute])
+        // Assigning `menuBarSectionOrder` above persisted its normalized form,
+        // which already names every section — so nothing here reads as new and
+        // the user's hidden sections stay hidden.
         XCTAssertEqual(relaunched.visibleMenuBarSections, [.statusDetails, .quickActions])
         XCTAssertEqual(relaunched.visibleHomeDashboardSections, [.sessionSummary, .sessionReportCard])
         XCTAssertEqual(relaunched.defaultSettingsSection, .customization)
@@ -600,6 +605,53 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.copilotSidecarExpanded)
     }
 
+    /// The real upgrade path: preferences written by a build that predates
+    /// `.repoGPSRoute`. The new section must arrive visible, or the RepoGPS
+    /// route control is invisible to exactly the users who customized their
+    /// menu bar — and it is one of the three surfaces that route is meant to
+    /// be settable from.
+    func testSectionAddedAfterPreferencesWereWrittenArrivesVisible() {
+        let legacySections: [MenuBarSection] = [.statusDetails, .modelPicker, .sessionStats, .quickActions, .updates]
+        defaults.set(
+            legacySections.map(\.rawValue),
+            forKey: AppViewModel.menuBarSectionOrderDefaultsKey
+        )
+        defaults.set(
+            [MenuBarSection.statusDetails.rawValue, MenuBarSection.modelPicker.rawValue].map { $0 },
+            forKey: AppViewModel.visibleMenuBarSectionsDefaultsKey
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.visibleMenuBarSections.contains(.repoGPSRoute))
+        // Sections the user hid in the old build stay hidden.
+        XCTAssertFalse(vm.visibleMenuBarSections.contains(.sessionStats))
+        XCTAssertFalse(vm.visibleMenuBarSections.contains(.quickActions))
+        XCTAssertTrue(vm.visibleMenuBarSections.contains(.statusDetails))
+        XCTAssertTrue(vm.menuBarSectionOrder.contains(.repoGPSRoute))
+    }
+
+    /// A section the user deliberately hid must stay hidden across a version
+    /// that adds new sections — the "new sections arrive visible" rule keys off
+    /// absence from the stored *order*, not absence from the visible list.
+    func testDeliberatelyHiddenSectionsStayHiddenWhenNewSectionsAppear() {
+        defaults.set(
+            MenuBarSection.allCases.map(\.rawValue),
+            forKey: AppViewModel.menuBarSectionOrderDefaultsKey
+        )
+        defaults.set(
+            [MenuBarSection.quickActions.rawValue],
+            forKey: AppViewModel.visibleMenuBarSectionsDefaultsKey
+        )
+
+        let vm = AppViewModel(defaults: defaults)
+
+        // Every section is present in the stored order, so nothing is new and
+        // nothing is force-shown.
+        XCTAssertEqual(vm.visibleMenuBarSections, [.quickActions])
+        XCTAssertFalse(vm.visibleMenuBarSections.contains(.repoGPSRoute))
+    }
+
     func testMenuBarCustomizationNormalizesStoredUnknownMissingAndDuplicateSections() {
         defaults.set(
             [
@@ -621,8 +673,18 @@ final class AppViewModelTests: XCTestCase {
 
         let vm = AppViewModel(defaults: defaults)
 
-        XCTAssertEqual(vm.menuBarSectionOrder, [.quickActions, .statusDetails, .modelPicker, .sessionStats, .updates])
-        XCTAssertEqual(vm.visibleMenuBarSections, [.quickActions])
+        // Unknown entries dropped, duplicates collapsed, and every section the
+        // stored order omits — including the newly added `.repoGPSRoute` —
+        // restored in `defaultOrder` position.
+        XCTAssertEqual(vm.menuBarSectionOrder, [.quickActions, .statusDetails, .modelPicker, .repoGPSRoute, .sessionStats, .updates])
+        // The stored order names only `quickActions` and `statusDetails`, so
+        // every other section reads as postdating these preferences and comes
+        // back visible. `statusDetails` remains hidden: it is in the stored
+        // order but not the stored visible list, which is a real hide.
+        XCTAssertEqual(
+            vm.visibleMenuBarSections,
+            [.quickActions, .modelPicker, .repoGPSRoute, .sessionStats, .updates]
+        )
     }
 
     func testKeysProviderCustomizationNormalizesStoredUnknownMissingAndDuplicateProviders() {
@@ -2899,12 +2961,11 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testSparkleChannelsStayStableByDefault() {
-        XCTAssertEqual(SoftwareUpdateChannelPolicy.allowedChannels(alphaUpdatesEnabled: false, isAlphaBuild: false), [])
+        XCTAssertEqual(SoftwareUpdateChannelPolicy.allowedChannels(isAlphaBuild: false), [])
     }
 
-    func testSparkleChannelsIncludeAlphaWhenOptedInOrAlreadyAlpha() {
-        XCTAssertEqual(SoftwareUpdateChannelPolicy.allowedChannels(alphaUpdatesEnabled: true, isAlphaBuild: false), ["alpha"])
-        XCTAssertEqual(SoftwareUpdateChannelPolicy.allowedChannels(alphaUpdatesEnabled: false, isAlphaBuild: true), ["alpha"])
+    func testSparkleChannelsIncludeAlphaOnlyForAlphaBuilds() {
+        XCTAssertEqual(SoftwareUpdateChannelPolicy.allowedChannels(isAlphaBuild: true), ["alpha"])
     }
 
     func testAlphaRequiredFailureEventsBypassOptionalAnalytics() {

@@ -58,6 +58,14 @@ struct MenuBarView: View {
     @EnvironmentObject private var vm: AppViewModel
     @EnvironmentObject private var updateService: SoftwareUpdateService
     @Environment(\.openWindow) private var openWindow
+    /// Shared with Home and the Routing section via `AppViewModel`.
+    ///
+    /// This was a view-local `@StateObject` on the reasoning that two readers of
+    /// the same `route.json` agree anyway. They do — but Home had no reader at
+    /// all, so it had nothing to show for a CLI-owned route and fell back to the
+    /// Xcode selection. One owner fixes that and removes the second source of
+    /// truth in the same move.
+    private var routeControl: RouteControlService { vm.routeControl }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -90,10 +98,67 @@ struct MenuBarView: View {
         .onAppear {
             vm.importExternalSessionReportEvents()
         }
+        .task {
+            await vm.refreshRouteControlNow()
+        }
     }
 
     private var visibleOrderedSections: [MenuBarSection] {
-        vm.menuBarSectionOrder.filter { vm.visibleMenuBarSections.contains($0) }
+        vm.menuBarSectionOrder.filter {
+            vm.visibleMenuBarSections.contains($0)
+                && (vm.repoGPSRoutingFeatureEnabled || $0 != .repoGPSRoute)
+        }
+    }
+
+    /// The RepoGPS route, settable from the third surface.
+    ///
+    /// Picking here goes through the same `proxypilot route set` the Routing
+    /// settings section uses, so the CLI stays the single writer of
+    /// `route.json` and its `route.lock` still serializes every switch. The
+    /// label carries the restart because applying a route stops and respawns
+    /// the daemon, ending any RepoGPS request in flight — a menu has nowhere
+    /// good to put a confirmation, so the warning goes in the name.
+    @ViewBuilder
+    private var repoGPSRoutePicker: some View {
+        switch routeControl.availability {
+        case .missing:
+            Text("RepoGPS route unavailable — ProxyPilot CLI not found")
+        case .tooOld:
+            Text("RepoGPS route unavailable — CLI predates route control")
+        case .ready:
+            Picker("RepoGPS Model (restarts proxy)", selection: Binding(
+                get: { routeControl.status.model ?? "" },
+                set: { newModel in
+                    guard !newModel.isEmpty, newModel != routeControl.status.model else { return }
+                    Task {
+                        await routeControl.applyRoute(
+                            provider: routeControl.status.provider
+                                ?? vm.upstreamProvider.rawValue,
+                            model: newModel,
+                            port: routeControl.status.port
+                        )
+                    }
+                }
+            )) {
+                if routeControl.status.model == nil {
+                    Text("No route selected").tag("")
+                }
+                ForEach(repoGPSModelChoices, id: \.self) { model in
+                    Text(model).tag(model)
+                }
+            }
+            .disabled(routeControl.isApplying)
+        }
+    }
+
+    /// Keeps the route's current model selectable even when the GUI has not
+    /// discovered it, so opening the menu cannot silently retarget the route.
+    private var repoGPSModelChoices: [String] {
+        var choices = vm.xcodeAgentModelCandidates
+        if let current = routeControl.status.model, !current.isEmpty, !choices.contains(current) {
+            choices.insert(current, at: 0)
+        }
+        return choices
     }
 
     @ViewBuilder
@@ -116,7 +181,10 @@ struct MenuBarView: View {
             }
             .accessibilityLabel(vm.isRunning ? "Proxy running" : "Proxy stopped")
         case .modelPicker:
-            Picker("Model", selection: Binding(
+            // Named for its route. An unqualified "Model" read as though it
+            // governed everything the proxy serves, when it only ever set the
+            // Xcode / Claude Agent route — RepoGPS has its own, below.
+            Picker("Xcode Model", selection: Binding(
                 get: { vm.selectedXcodeAgentModel },
                 set: { vm.selectedXcodeAgentModel = $0 }
             )) {
@@ -124,12 +192,19 @@ struct MenuBarView: View {
                     Text(model).tag(model)
                 }
             }
+        case .repoGPSRoute:
+            repoGPSRoutePicker
         case .sessionStats:
             if vm.isRunning || vm.localProxyState.sessionRequestCount > 0 {
                 SessionStatsView(
                     state: vm.localProxyState,
                     reportCard: vm.sessionReportCard,
-                    upstreamProviderTitle: vm.upstreamProviderDisplayTitle,
+                    // The serving provider, not the configured one. The model
+                    // beside it has always been observed traffic, so pairing it
+                    // with the GUI's Xcode provider produced a sentence whose
+                    // two halves described different routes — correct only
+                    // while both happened to point at the same provider.
+                    upstreamProviderTitle: vm.servingRoute?.providerTitle ?? vm.upstreamProviderDisplayTitle,
                     estimatedCostText: vm.sessionMenuCostText
                 )
             } else {

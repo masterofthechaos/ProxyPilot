@@ -3,31 +3,60 @@ import XCTest
 
 final class SettingsSectionTests: XCTestCase {
     func testSettingsSectionsExposeNativeSidebarMetadataInOrder() {
-        XCTAssertEqual(SettingsSection.allCases, [.home, .history, .proxy, .keys, .advanced, .customization])
-        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .history, .proxy, .keys, .advanced, .customization])
+        XCTAssertEqual(SettingsSection.allCases, [.home, .history, .proxy, .routing, .keys, .advanced, .customization])
+        XCTAssertEqual(SettingsSection.sidebarSections, [.home, .history, .proxy, .routing, .keys, .advanced, .customization])
         XCTAssertEqual(SettingsSection.home.title, "Home")
         XCTAssertEqual(SettingsSection.history.title, "Session History")
         XCTAssertEqual(SettingsSection.proxy.title, "Proxy")
+        XCTAssertEqual(SettingsSection.routing.title, "Routing")
         XCTAssertEqual(SettingsSection.keys.title, "Keys & Providers")
         XCTAssertEqual(SettingsSection.advanced.title, "Advanced")
         XCTAssertEqual(SettingsSection.customization.title, "Customization")
         XCTAssertEqual(SettingsSection.home.systemImage, "house")
         XCTAssertEqual(SettingsSection.history.systemImage, "clock.arrow.circlepath")
         XCTAssertEqual(SettingsSection.proxy.systemImage, "network")
+        XCTAssertEqual(SettingsSection.routing.systemImage, "arrow.triangle.branch")
         XCTAssertEqual(SettingsSection.keys.systemImage, "key")
         XCTAssertEqual(SettingsSection.advanced.systemImage, "gearshape")
         XCTAssertEqual(SettingsSection.customization.systemImage, "paintpalette")
     }
 
     func testSettingsSectionsExposeCompactTabTitlesForCollapsedSidebar() {
-        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .history, .proxy, .keys, .advanced])
-        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "History", "Proxy", "Keys & Providers", "Advanced"])
+        XCTAssertEqual(SettingsSection.collapsedTabSections, [.home, .history, .proxy, .routing, .keys, .advanced])
+        XCTAssertEqual(SettingsSection.collapsedTabSections.map(\.compactTitle), ["Home", "History", "Proxy", "Routing", "Keys & Providers", "Advanced"])
         XCTAssertFalse(SettingsSection.collapsedTabSections.contains(.customization))
     }
 
-    func testProxySectionFocusExposesModelsTargetAndHighlightDuration() {
+    func testRepoGPSRoutingFeatureFiltersNavigationWithoutRemovingSection() {
+        XCTAssertTrue(SettingsSection.allCases.contains(.routing))
+        XCTAssertFalse(
+            SettingsSection.availableSidebarSections(repoGPSRoutingEnabled: false).contains(.routing)
+        )
+        XCTAssertFalse(
+            SettingsSection.availableCollapsedTabSections(repoGPSRoutingEnabled: false).contains(.routing)
+        )
+        XCTAssertTrue(
+            SettingsSection.availableSidebarSections(repoGPSRoutingEnabled: true).contains(.routing)
+        )
+        XCTAssertTrue(
+            SettingsSection.availableCollapsedTabSections(repoGPSRoutingEnabled: true).contains(.routing)
+        )
+    }
+
+    func testRepoGPSRoutingFeatureRequiresInstallerOwnedExecutable() {
+        let home = URL(fileURLWithPath: "/Users/example")
+        let expected = "/Users/example/.local/bin/rgps"
+
+        XCTAssertEqual(RepoGPSRoutingFeatureFlag.candidateExecutable(home: home).path, expected)
+        XCTAssertTrue(RepoGPSRoutingFeatureFlag.isEnabled(home: home) { $0 == expected })
+        XCTAssertFalse(RepoGPSRoutingFeatureFlag.isEnabled(home: home) { _ in false })
+    }
+
+    func testProxySectionFocusExposesTargetsAndHighlightDuration() {
         XCTAssertEqual(ProxySectionFocus.models.rawValue, "models")
         XCTAssertEqual(ProxySectionFocus.models.highlightDurationSeconds, 4)
+        XCTAssertEqual(ProxySectionFocus.agentRegistration.rawValue, "agentRegistration")
+        XCTAssertEqual(ProxySectionFocus.agentRegistration.highlightDurationSeconds, 4)
     }
 
     func testModelSelectionListLayoutStaysBoundedForLargeProviderCatalogs() {

@@ -11,6 +11,7 @@ struct HomeDashboardView: View {
     let onOpenProxy: () -> Void
     let onOpenCaching: () -> Void
     let onOpenAgentModel: () -> Void
+    let onOpenManualAgentRegistration: () -> Void
     let onOpenPreflight: () -> Void
     let onOpenSessionHistory: () -> Void
 
@@ -145,12 +146,30 @@ struct HomeDashboardView: View {
         )
     }
 
+    /// Names the route that produced the metrics beside it.
+    ///
+    /// While something is serving this is the serving route — which is the CLI's
+    /// `route.json` whenever a CLI daemon owns the proxy, not the GUI's Xcode
+    /// selection. With nothing serving there is no live route to name, so it
+    /// falls back to the configured provider, which is unambiguous precisely
+    /// because a stopped proxy is serving no one.
     private var upstreamProviderBadge: some View {
-        statusBadge(
-            title: vm.upstreamProviderDisplayTitle,
-            systemImage: "network",
-            color: .accentColor
-        )
+        Group {
+            if let serving = vm.servingRouteBadgeTitle {
+                statusBadge(
+                    title: serving,
+                    systemImage: "bolt.horizontal.circle",
+                    color: .accentColor
+                )
+            } else {
+                statusBadge(
+                    title: vm.upstreamProviderDisplayTitle,
+                    systemImage: "network",
+                    color: .accentColor
+                )
+            }
+        }
+        .help(vm.servingRouteBadgeHelpText)
     }
 
     private var workflowControls: some View {
@@ -256,12 +275,20 @@ struct HomeDashboardView: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
 
-                Button { onOpenProxy() } label: {
-                    Text("Full setup and verification in **Proxy**.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if vm.proxyPilotAgentUsesManualRegistration {
+                    Button(action: onOpenManualAgentRegistration) {
+                        Label("Show manual registration steps", systemImage: "list.bullet.rectangle")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityHint("Opens the exact Xcode agent registration values in Proxy settings.")
+                } else {
+                    Button { onOpenProxy() } label: {
+                        Text("Full setup and verification in **Proxy**.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
@@ -880,11 +907,15 @@ struct HomeDashboardView: View {
             .help("Open agent model selection")
             .accessibilityHint("Opens the Proxy section to select an agent model.")
         } else {
+            // Always route-labelled. Unlabelled, this sits in a row of observed
+            // traffic and reads as "this served your requests" — false whenever
+            // a CLI daemon owns the proxy, which is the defect this fixes.
             statusBadge(
-                title: vm.homeAgentModelBadgeTitle,
+                title: vm.homeAgentModelBadgeLabel,
                 systemImage: "cpu",
                 color: vm.hasPendingXcodeAgentModelChange ? .orange : .secondary
             )
+            .opacity(vm.isXcodeRouteIdle ? 0.65 : 1)
             .help(vm.homeAgentModelBadgeHelpText)
         }
     }

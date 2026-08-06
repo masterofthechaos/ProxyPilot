@@ -11,7 +11,7 @@ struct RuntimeCommand: ParsableCommand {
 }
 
 private enum SharedRuntime {
-    static let version = "1.13.0"
+    static let version = "1.13.2"
     static var root: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".proxypilot") }
     static var payload: URL { root.appendingPathComponent("cli/\(version)/proxypilot") }
     static var stable: URL { root.appendingPathComponent("bin/proxypilot") }
@@ -51,7 +51,7 @@ struct RuntimeActivateCommand: ParsableCommand {
         let link = SharedRuntime.stable.deletingLastPathComponent().appendingPathComponent(".proxypilot-\(UUID().uuidString)"); try FileManager.default.createSymbolicLink(at: link, withDestinationURL: SharedRuntime.payload)
         try SharedRuntime.atomicReplace(link, at: SharedRuntime.stable)
         guard SharedRuntime.compatible(SharedRuntime.stable) else { throw ValidationError("Activated runtime failed capability verification") }
-        print(#"{"action":"activated","compatible":true,"path":"\#(SharedRuntime.stable.path)","version":"1.13.0"}"#)
+        print(#"{"action":"activated","compatible":true,"path":"\#(SharedRuntime.stable.path)","version":"\#(SharedRuntime.version)"}"#)
     }
 }
 

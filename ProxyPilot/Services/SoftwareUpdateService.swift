@@ -6,25 +6,14 @@ import Sparkle
 enum SoftwareUpdateChannelPolicy {
     static let alphaChannel = "alpha"
 
-    static func allowedChannels(alphaUpdatesEnabled: Bool, isAlphaBuild: Bool) -> Set<String> {
-        if alphaUpdatesEnabled || isAlphaBuild {
-            return [alphaChannel]
-        }
-        return []
+    static func allowedChannels(isAlphaBuild: Bool) -> Set<String> {
+        isAlphaBuild ? [alphaChannel] : []
     }
 }
 
 @MainActor
 final class SoftwareUpdateService: NSObject, ObservableObject, SPUUpdaterDelegate {
     @Published var canCheckForUpdates = false
-    @Published var alphaUpdatesEnabled: Bool {
-        didSet {
-            defaults.set(alphaUpdatesEnabled, forKey: Self.alphaUpdatesEnabledDefaultsKey)
-            didRunLaunchBackgroundCheck = false
-        }
-    }
-
-    static let alphaUpdatesEnabledDefaultsKey = "proxypilot.updates.alphaChannelEnabled"
 
     private lazy var updaterController: SPUStandardUpdaterController = {
         SPUStandardUpdaterController(
@@ -34,13 +23,10 @@ final class SoftwareUpdateService: NSObject, ObservableObject, SPUUpdaterDelegat
         )
     }()
 
-    private let defaults: UserDefaults
     private var cancellables: Set<AnyCancellable> = []
     private var didRunLaunchBackgroundCheck = false
 
-    init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        alphaUpdatesEnabled = defaults.bool(forKey: Self.alphaUpdatesEnabledDefaultsKey)
+    override init() {
         super.init()
 
         let updater = updaterController.updater
@@ -66,7 +52,6 @@ final class SoftwareUpdateService: NSObject, ObservableObject, SPUUpdaterDelegat
     nonisolated func allowedChannels(for updater: SPUUpdater) -> Set<String> {
         MainActor.assumeIsolated {
             SoftwareUpdateChannelPolicy.allowedChannels(
-                alphaUpdatesEnabled: alphaUpdatesEnabled,
                 isAlphaBuild: AppBuildBadge.current != nil
             )
         }

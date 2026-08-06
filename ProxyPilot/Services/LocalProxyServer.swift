@@ -785,7 +785,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     line,
                     provider: config.upstreamProvider
                 )
-                let sseData = Data((normalizedLine + "\n").utf8)
+                let sseData = SSEFraming.terminatedData(normalizedLine)
                 outputCapture.append(sseData)
                 await sendData(sseData, on: connection)
 
@@ -1600,7 +1600,7 @@ final class LocalProxyServer: @unchecked Sendable {
                     promptCacheMissTokens: &lastSeenPromptCacheMissTokens,
                     promptCacheWriteTokens: &lastSeenPromptCacheWriteTokens
                 )
-                let sseData = Data((validatedLine + "\n").utf8)
+                let sseData = SSEFraming.terminatedData(validatedLine)
                 outputCapture.append(sseData)
                 await sendData(sseData, on: connection)
                 didReceiveStreamData = true

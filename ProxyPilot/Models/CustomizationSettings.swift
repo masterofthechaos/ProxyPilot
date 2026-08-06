@@ -69,6 +69,7 @@ enum HomeDashboardSection: String, CaseIterable, Identifiable {
 enum MenuBarSection: String, CaseIterable, Identifiable {
     case statusDetails
     case modelPicker
+    case repoGPSRoute
     case sessionStats
     case quickActions
     case updates
@@ -78,6 +79,7 @@ enum MenuBarSection: String, CaseIterable, Identifiable {
     static let defaultOrder: [MenuBarSection] = [
         .statusDetails,
         .modelPicker,
+        .repoGPSRoute,
         .sessionStats,
         .quickActions,
         .updates
@@ -88,7 +90,9 @@ enum MenuBarSection: String, CaseIterable, Identifiable {
         case .statusDetails:
             return "Proxy status"
         case .modelPicker:
-            return "Agent model picker"
+            return "Xcode model picker"
+        case .repoGPSRoute:
+            return "RepoGPS route"
         case .sessionStats:
             return "Session metrics"
         case .quickActions:
@@ -104,6 +108,8 @@ enum MenuBarSection: String, CaseIterable, Identifiable {
             return "Running or stopped state in the dropdown."
         case .modelPicker:
             return "Choose the Xcode Agent upstream model."
+        case .repoGPSRoute:
+            return "Choose the RepoGPS model. Applying restarts the proxy daemon."
         case .sessionStats:
             return "Requests, tokens, and latest model."
         case .quickActions:

@@ -34,6 +34,7 @@ enum AppBuildBadge {
 struct SettingsSidebarView: View {
     @Binding var selection: SettingsSection
 
+    let sections: [SettingsSection]
     let versionText: String
     let buildText: String
 
@@ -41,7 +42,7 @@ struct SettingsSidebarView: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(spacing: 4) {
-                    ForEach(SettingsSection.sidebarSections) { section in
+                    ForEach(sections) { section in
                         Button {
                             selection = section
                         } label: {

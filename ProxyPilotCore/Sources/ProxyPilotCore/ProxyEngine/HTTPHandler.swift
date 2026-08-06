@@ -486,7 +486,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         promptCacheWriteTokens: &lastSeenPromptCacheWriteTokens
                     )
 
-                    let lineData = Data((validatedLine + "\n").utf8)
+                    let lineData = SSEFraming.terminatedData(validatedLine)
                     outputCapture.append(lineData)
 
                     if !streamStarted {
@@ -1027,7 +1027,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                         rawLine,
                         provider: config.upstreamProvider
                     )
-                    let chunkData = Data((normalizedLine + "\n").utf8)
+                    let chunkData = SSEFraming.terminatedData(normalizedLine)
                     outputCapture.append(chunkData)
 
                     if !streamStarted {

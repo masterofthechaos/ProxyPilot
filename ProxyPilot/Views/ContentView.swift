@@ -92,6 +92,9 @@ struct ContentView: View {
             if selectedSection == .home {
                 selectedSection = vm.defaultSettingsSection
             }
+            if selectedSection == .routing && !vm.repoGPSRoutingFeatureEnabled {
+                selectedSection = .home
+            }
             vm.refreshStatus()
             vm.runPreflightChecks()
             vm.startLogUpdates()
@@ -165,6 +168,9 @@ struct ContentView: View {
         HStack(spacing: 0) {
             SettingsSidebarView(
                 selection: $selectedSection,
+                sections: SettingsSection.availableSidebarSections(
+                    repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
+                ),
                 versionText: appVersionText,
                 buildText: appBuildText
             )
@@ -221,7 +227,7 @@ struct ContentView: View {
 
             GlassControlGroup(cornerRadius: 24, padding: 4) {
                 HStack(spacing: 0) {
-                    ForEach(Array(SettingsSection.collapsedTabSections.dropFirst().enumerated()), id: \.element) { index, section in
+                    ForEach(Array(availableCollapsedTabSections.dropFirst().enumerated()), id: \.element) { index, section in
                         if index > 0 {
                             Rectangle()
                                 .fill(Color(nsColor: .separatorColor).opacity(0.45))
@@ -240,6 +246,12 @@ struct ContentView: View {
         .padding(.horizontal, 18)
         .padding(.top, 18)
         .padding(.bottom, 16)
+    }
+
+    private var availableCollapsedTabSections: [SettingsSection] {
+        SettingsSection.availableCollapsedTabSections(
+            repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
+        )
     }
 
     private func collapsedTabButton(for section: SettingsSection, showsIcon: Bool) -> some View {
@@ -301,6 +313,7 @@ struct ContentView: View {
                 onOpenProxy: { selectedSection = .proxy },
                 onOpenCaching: { focusProxySection(.cacheSignals) },
                 onOpenAgentModel: { focusProxySection(.models) },
+                onOpenManualAgentRegistration: { focusProxySection(.agentRegistration) },
                 onOpenPreflight: {
                     selectedSection = .proxy
                     preflightExpanded = true
@@ -317,6 +330,9 @@ struct ContentView: View {
                 .environmentObject(vm)
         case .proxy:
             proxyTab
+        case .routing:
+            RoutingView()
+                .environmentObject(vm)
         case .keys:
             keysTab
         case .advanced:
@@ -941,7 +957,9 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
 
                         if vm.proxyPilotAgentUsesManualRegistration {
-                            DisclosureGroup("Manual Registration Required") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Manual Registration Required")
+                                    .font(.subheadline.weight(.semibold))
                                 Text("In Xcode Settings > Intelligence, add an agent with these exact values:")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -953,6 +971,12 @@ struct ContentView: View {
                                     .background(Color(nsColor: .controlBackgroundColor))
                                     .clipShape(RoundedRectangle(cornerRadius: 6))
                             }
+                            .padding(.vertical, 2)
+                            .id(ProxySectionFocus.agentRegistration)
+                            .proxyFocusGlow(
+                                isActive: highlightedProxySection == .agentRegistration,
+                                color: vm.proxyPilotAccentColor
+                            )
                         }
 
                         HStack(spacing: 12) {
@@ -2039,22 +2063,6 @@ struct ContentView: View {
                 .toggleStyle(.switch)
                 .help("Hide the Dock icon and keep ProxyPilot running from the menu bar. Keeps the menu bar icon enabled so the app stays reachable.")
                 .accessibilityLabel("Run in background")
-            }
-
-            Section("Updates") {
-                Toggle("Include alpha channel updates", isOn: Binding(
-                    get: { updateService.alphaUpdatesEnabled },
-                    set: { updateService.alphaUpdatesEnabled = $0 }
-                ))
-                .toggleStyle(.switch)
-                .help("Allows Sparkle to offer alpha-channel builds when the appcast publishes them.")
-
-                Text(updateService.alphaUpdatesEnabled
-                     ? "Sparkle will include alpha-channel releases in update checks. Turn this off to return to the stable update channel before checking again."
-                     : "Stable update checks stay on the main appcast channel. Alpha builds can be offered later through Sparkle channel metadata without changing the app.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
             }
 
             InputOutputLoggingSettingsView {
