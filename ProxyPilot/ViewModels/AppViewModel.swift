@@ -426,20 +426,21 @@ final class AppViewModel: ObservableObject {
         lastImportedSessionReportFingerprint = nil
     }
 
-    func importExternalSessionReportEvents() {
-        guard let fingerprint = currentSessionReportFingerprint() else { return }
-        guard fingerprint != lastImportedSessionReportFingerprint else { return }
+    @discardableResult
+    func importExternalSessionReportEvents() -> Task<Void, Never>? {
+        guard let fingerprint = currentSessionReportFingerprint() else { return nil }
+        guard fingerprint != lastImportedSessionReportFingerprint else { return nil }
 
         if sessionReportImportInFlight {
             sessionReportImportNeedsRetry = true
-            return
+            return nil
         }
 
         sessionReportImportInFlight = true
         let generation = sessionReportImportGeneration
         let sessionReportURL = sessionReportURL
 
-        Task.detached(priority: .userInitiated) { [sessionReportURL, fingerprint] in
+        return Task.detached(priority: .userInitiated) { [sessionReportURL, fingerprint] in
             let events = try? SessionReportStore.readEvents(from: sessionReportURL)
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -454,7 +455,12 @@ final class AppViewModel: ObservableObject {
                     }
                 }
 
-                guard generation == self.sessionReportImportGeneration else { return }
+                guard generation == self.sessionReportImportGeneration else {
+                    if let events {
+                        self.suppressedExternalSessionIDs.formUnion(events.map(\.sessionID))
+                    }
+                    return
+                }
                 guard let events else { return }
                 self.lastImportedSessionReportFingerprint = fingerprint
                 self.applyExternalSessionReportEvents(events)
@@ -527,7 +533,7 @@ final class AppViewModel: ObservableObject {
         return providerManager.hasUpstreamKey
     }
     var hasMasterKey: Bool { KeychainService.exists(key: .litellmMasterKey) }
-    var requiresMasterKey: Bool { !useBuiltInProxy || requireLocalAuth }
+    var requiresMasterKey: Bool { !useBuiltInProxy || requireLocalAuth || hasUpstreamKey }
     var hasRequiredMasterKey: Bool { !requiresMasterKey || hasMasterKey }
 
     var isRunning: Bool {
@@ -668,6 +674,12 @@ final class AppViewModel: ObservableObject {
         let didMigrateQwen = defaults.bool(forKey: didMigrateQwenVisibleProviderDefaultsKey)
         if !didMigrateQwen && storedOrderRawValues?.contains(KeysProviderViewItem.qwen.rawValue) != true {
             decoded.insert(.qwen)
+            defaults.set(
+                KeysProviderViewItem.defaultOrder
+                    .filter { decoded.contains($0) }
+                    .map(\.rawValue),
+                forKey: visibleKeysProvidersDefaultsKey
+            )
             defaults.set(true, forKey: didMigrateQwenVisibleProviderDefaultsKey)
         }
         let didMigrateNineRouter = defaults.bool(forKey: didMigrateNineRouterVisibleProviderDefaultsKey)
@@ -846,6 +858,7 @@ final class AppViewModel: ObservableObject {
         for key in KeychainService.Key.allCases {
             try? KeychainService.delete(key: key)
         }
+        customProviderStorage.removeAll()
 
         defaults.removeObject(forKey: ProviderManager.upstreamProviderDefaultsKey)
         defaults.removeObject(forKey: Self.didCompleteOnboardingDefaultsKey)
@@ -1685,6 +1698,10 @@ final class AppViewModel: ObservableObject {
 
     @Published var showMenuBarExtra: Bool = true {
         didSet {
+            if runInBackground && !showMenuBarExtra {
+                showMenuBarExtra = true
+                return
+            }
             defaults.set(showMenuBarExtra, forKey: Self.showMenuBarExtraDefaultsKey)
         }
     }
@@ -3415,6 +3432,7 @@ final class AppViewModel: ObservableObject {
             markAnalyticsPromptHandledForCurrentVersion()
         }
         showOnboardingWizard = false
+        maybeShowAnalyticsPrompt()
         telemetryService.track(name: "onboarding_completed", telemetryOptIn: telemetryOptIn)
         clearIssue()
     }
@@ -4330,8 +4348,11 @@ final class AppViewModel: ObservableObject {
         }
 
         let upstreamKey = selectedUpstreamAPIKey()
+        let forwardsCredential = !(upstreamKey?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty ?? true)
         let masterKey: String
-        if requireLocalAuth {
+        if requireLocalAuth || forwardsCredential {
             guard let configuredMasterKey = KeychainService.get(key: .litellmMasterKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
                 !configuredMasterKey.isEmpty else {
@@ -4348,20 +4369,19 @@ final class AppViewModel: ObservableObject {
         }
 
         let hasFetchedModels = !upstreamModels.isEmpty
-        var allowedModels: Set<String> = {
+        let allowedModels: Set<String> = {
+            if hasActiveCustomProvider { return selectedUpstreamModels.union(savedDefaultModels) }
             if provider == .githubCopilot { return Set(proxySyncModelCandidates) }
             if !selectedUpstreamModels.isEmpty {
-                return selectedUpstreamModels.union(savedDefaultModels)
+                let visibleIDs = Set(providerManager.modelSelectionRows.map(\.id))
+                return selectedUpstreamModels.intersection(visibleIDs)
+                    .union(savedDefaultModels.filter { visibleIDs.contains($0) })
             }
             if hasFetchedModels { return Set(savedDefaultModels) }
             if let fallback = provider.fallbackModelIDs { return Set(fallback) }
             return Set(savedDefaultModels)
         }()
         let preferredModel = effectiveXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !preferredModel.isEmpty, (!hasFetchedModels || allowedModels.contains(preferredModel)) {
-            allowedModels.insert(preferredModel)
-        }
-
         guard let defaultUpstreamBase = URL(string: selectedUpstreamProviderDefaultAPIBaseURL) else {
             throw IssueError(issue: AppIssue(
                 code: .invalidProxyURL,
@@ -4394,7 +4414,8 @@ final class AppViewModel: ObservableObject {
             upstreamAPIBase: upstreamBase,
             upstreamAPIKey: upstreamKey,
             allowedModels: allowedModels,
-            requiresAuth: requireLocalAuth,
+            denyRequestsWhenAllowlistEmpty: true,
+            requiresAuth: requireLocalAuth || forwardsCredential,
             anthropicTranslatorMode: anthropicTranslatorFallbackEnabled ? .legacyFallback : .hardened,
             miniMaxRoutingMode: providerManager.miniMaxRoutingMode,
             preferredAnthropicUpstreamModel: preferredModel.isEmpty
@@ -4438,11 +4459,19 @@ final class AppViewModel: ObservableObject {
     }
 
     private static func csvEscaped(_ value: String) -> String {
-        if value.contains(",") || value.contains("\"") || value.contains("\n") {
-            let escaped = value.replacingOccurrences(of: "\"", with: "\"\"")
+        let formulaSafeValue: String
+        switch value.unicodeScalars.first {
+        case "=", "+", "-", "@", "\t", "\r", "\n":
+            formulaSafeValue = "'" + value
+        default:
+            formulaSafeValue = value
+        }
+
+        if formulaSafeValue.contains(",") || formulaSafeValue.contains("\"") || formulaSafeValue.contains("\n") || formulaSafeValue.contains("\r") {
+            let escaped = formulaSafeValue.replacingOccurrences(of: "\"", with: "\"\"")
             return "\"\(escaped)\""
         }
-        return value
+        return formulaSafeValue
     }
 
     private static func compactInteger(_ value: Int) -> String {
@@ -4496,12 +4525,12 @@ final class AppViewModel: ObservableObject {
         guard let baseURL = try? validatedProxyURL(requireLocalhost: false).url else { return }
 
         do {
-            let statusCode = try await proxyService.probe(baseURL: baseURL)
+            let probe = try await proxyService.probe(baseURL: baseURL)
             guard sequence == statusRefreshSequence else { return }
-            if statusCode == 200 {
+            if probe.statusCode == 200 && probe.isProxyPilot {
                 applyProxyRuntimeStatus(locallyRunning ? .runningInApp : .runningExternal)
             } else {
-                applyProxyRuntimeStatus(.portOccupied(statusCode: statusCode))
+                applyProxyRuntimeStatus(.portOccupied(statusCode: probe.statusCode))
             }
         } catch {
             guard sequence == statusRefreshSequence else { return }
@@ -5068,10 +5097,19 @@ final class AppViewModel: ObservableObject {
 
     var diyInstallCommands: String {
         let proxyBase = proxyURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let settingsObject: [String: Any] = [
+            "env": [
+                "ANTHROPIC_AUTH_TOKEN": "proxypilot",
+                "ANTHROPIC_BASE_URL": proxyBase
+            ]
+        ]
+        let settingsData = try? JSONSerialization.data(withJSONObject: settingsObject, options: [.sortedKeys])
+        let settingsJSON = settingsData.map { String(decoding: $0, as: UTF8.self) } ?? "{}"
+        let quotedSettings = ShellArgumentEscaper.singleQuote(settingsJSON)
         return """
         # Install (route Xcode Agent through ProxyPilot):
         mkdir -p ~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig
-        echo '{"env":{"ANTHROPIC_AUTH_TOKEN":"proxypilot","ANTHROPIC_BASE_URL":"\(proxyBase)"}}' \\
+        printf '%s\\n' \(quotedSettings) \\
           > ~/Library/Developer/Xcode/CodingAssistant/ClaudeAgentConfig/settings.json
         defaults write com.apple.dt.Xcode IDEChatClaudeAgentAPIKeyOverride " "
 

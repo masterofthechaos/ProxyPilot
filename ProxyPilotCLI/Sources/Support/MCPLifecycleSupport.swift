@@ -98,6 +98,20 @@ enum MCPXcodeConfigConsent {
     }
 }
 
+enum MCPIOSessionLogConsent {
+    static let environmentVariable = "PROXYPILOT_MCP_ALLOW_IO_LOGS"
+    static let argumentName = "allow_io_log_read"
+
+    static var environmentAllowsReads: Bool {
+        guard let raw = ProcessInfo.processInfo.environment[environmentVariable]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() else {
+            return false
+        }
+        return ["1", "true", "yes", "allow"].contains(raw)
+    }
+}
+
 struct SessionStatsToolPayload: Encodable {
     let requests: Int
     let totalTokens: Int

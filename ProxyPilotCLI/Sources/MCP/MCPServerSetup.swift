@@ -414,7 +414,8 @@ enum MCPServerSetup {
                     description: "List recorded proxy sessions, or show one session's request history and (optionally) its decrypted input/output logs. Omit session_id to list all recorded sessions.",
                     inputSchema: jsonSchemaObject(properties: [
                         "session_id": stringProp("Session ID to show details for. Omit to list all recorded sessions."),
-                        "include_logs": boolProp("When session_id is provided, also include decrypted input/output log records if input & output logging is enabled (default: false)."),
+                        "include_logs": boolProp("When session_id is provided, also include decrypted input/output log records if input & output logging is enabled (default: false). Requires \(MCPIOSessionLogConsent.environmentVariable)=1 on the MCP server and allow_io_log_read: true on this call."),
+                        "allow_io_log_read": boolProp("Must be true after the user explicitly consents to exposing decrypted prompts and outputs for this session."),
                     ]),
                     annotations: .init(
                         readOnlyHint: true,
@@ -758,18 +759,26 @@ enum MCPServerSetup {
 
             case "proxy_restart", "proxy_route_set":
                 let routeTool = params.name == "proxy_route_set" ? "proxy_route_set" : "proxy_restart"
+                let isRouteSet = routeTool == "proxy_route_set"
+                // proxy_route_set advertises only port/provider/model, but shares this
+                // handler with proxy_restart, which also declares key/url/prompt_caching.
+                // An MCP client renders its consent prompt from the declared schema, so
+                // honoring those here would let a route change redirect proxied traffic —
+                // and the stored upstream key — to a host the user never saw. The route
+                // path therefore takes them from the server's own configuration only.
+                let privilegedArguments = isRouteSet ? nil : params.arguments
                 let parsedPort = portArgument(params.arguments, default: port, tool: routeTool)
                 if let error = parsedPort.error { return error }
                 let reqPort = parsedPort.port ?? port
-                let parsedProvider = MCPArgumentValidator.optionalProvider(params.arguments?["provider"], tool: "proxy_restart")
-                let parsedKey = stringArgument(params.arguments, name: "key", default: key, tool: routeTool)
+                let parsedProvider = MCPArgumentValidator.optionalProvider(params.arguments?["provider"], tool: routeTool)
+                let parsedKey = stringArgument(privilegedArguments, name: "key", default: key, tool: routeTool)
                 if let error = parsedKey.error { return error }
-                let parsedURL = stringArgument(params.arguments, name: "url", default: upstreamURL, tool: routeTool)
+                let parsedURL = stringArgument(privilegedArguments, name: "url", default: upstreamURL, tool: routeTool)
                 if let error = parsedURL.error { return error }
                 let parsedModel = stringArgument(params.arguments, name: "model", default: nil, tool: routeTool)
                 if let error = parsedModel.error { return error }
                 let parsedPromptCaching = promptCachingArgument(
-                    params.arguments?["prompt_caching"],
+                    privilegedArguments?["prompt_caching"],
                     default: promptCaching,
                     tool: routeTool
                 )
@@ -778,7 +787,7 @@ enum MCPServerSetup {
                 let reqURL = parsedURL.value
                 let reqModel = parsedModel.value
                 let reqPromptCaching = parsedPromptCaching.value
-                if routeTool == "proxy_route_set", reqModel == nil {
+                if isRouteSet, reqModel == nil {
                     return toolError(tool: routeTool, code: "E049", message: "model is required")
                 }
 
@@ -791,6 +800,18 @@ enum MCPServerSetup {
                         tool: routeTool,
                         code: "E001",
                         message: message,
+                        suggestion: "Valid providers: \(UpstreamProvider.cliOptionsDescription)"
+                    )
+                }
+
+                // The schema marks provider required; enforce it rather than falling
+                // back to the ambient or current provider, so a route is never set to
+                // a provider the caller did not name.
+                if isRouteSet, requestedProvider == nil {
+                    return toolError(
+                        tool: routeTool,
+                        code: "E049",
+                        message: "provider is required",
                         suggestion: "Valid providers: \(UpstreamProvider.cliOptionsDescription)"
                     )
                 }
@@ -857,8 +878,8 @@ enum MCPServerSetup {
                     contextCompaction: contextCompaction.configuration()
                 )
 
-                do {
-                    return try await lifecycleGate.withLock {
+                let applyRoute: () async throws -> CallTool.Result = {
+                    try await lifecycleGate.withLock {
                         let previousConfig = await state.currentConfiguration()
                         // Stop if running (ignore error if not running)
                         try? await state.stop()
@@ -871,9 +892,35 @@ enum MCPServerSetup {
                             }
                             throw error
                         }
+                        // Record the selection in the CLI-owned route store. Without
+                        // this, `route status` keeps reporting the superseded route and
+                        // `route ensure` restarts the daemon on it, silently reverting
+                        // the change made here.
+                        if isRouteSet, let selectedModel = reqModel {
+                            do {
+                                try RouteStateStore.save(
+                                    RouteSelection(
+                                        provider: upstream.rawValue,
+                                        model: selectedModel,
+                                        port: boundPort,
+                                        updatedAt: Date()
+                                    )
+                                )
+                            } catch {
+                                return toolError(
+                                    tool: routeTool,
+                                    code: "E058",
+                                    message: "Proxy restarted on \(upstream.rawValue) [\(selectedModel)], but the route could not be recorded: \(error).",
+                                    suggestion: "Check that \(RouteStateStore.directory.path) is writable; otherwise `route ensure` may revert to the previous route."
+                                )
+                            }
+                        }
                         let modelInfo = reqModel.map { " [\($0)]" }
                             ?? (resolvedModels.wasDiscoveredFromUpstream ? " [\(modelList.count) discovered model(s)]" : "")
                         let selectionInfo = credential.selectedFromStoredCredentials ? " (selected from stored provider keys)" : ""
+                        let text = isRouteSet
+                            ? "Route set to \(upstream.title)\(modelInfo) on port \(boundPort)\(selectionInfo). The downstream model remains \(ActiveModelAlias.id)."
+                            : "ProxyPilot restarted on port \(boundPort) -> \(upstream.title)\(modelInfo)\(selectionInfo).\nCall xcode_config_install (port: \(boundPort)) to update Xcode routing."
                         return toolSuccess(
                             tool: routeTool,
                             data: ProxyLifecyclePayload(
@@ -882,10 +929,27 @@ enum MCPServerSetup {
                                 provider: upstream.rawValue,
                                 model: reqModel
                             ),
-                            text: "ProxyPilot restarted on port \(boundPort) -> \(upstream.title)\(modelInfo)\(selectionInfo).\nCall xcode_config_install (port: \(boundPort)) to update Xcode routing.",
+                            text: text,
                             nextActions: [MCPXcodeConfigConsent.installNextAction(port: boundPort)]
                         )
                     }
+                }
+
+                do {
+                    // Route changes additionally take the cross-process route.lock so a
+                    // concurrent `proxypilot route set` (including the GUI, which shells
+                    // out to it) cannot interleave with this one.
+                    if isRouteSet {
+                        return try await RouteStateStore.withExclusiveLock(applyRoute)
+                    }
+                    return try await applyRoute()
+                } catch is RouteLockUnavailable {
+                    return toolError(
+                        tool: routeTool,
+                        code: "E059",
+                        message: "Another route switch is in progress.",
+                        suggestion: "Retry once the in-flight route change completes."
+                    )
                 } catch {
                     return toolError(
                         tool: routeTool,
@@ -1221,7 +1285,24 @@ enum MCPServerSetup {
 
                     var logs: [InputOutputLogRecord]?
                     if includeLogs {
+                        guard MCPIOSessionLogConsent.environmentAllowsReads else {
+                            return toolError(
+                                tool: "get_session_history",
+                                code: "E061_IO_LOG_READ_NOT_ALLOWED",
+                                message: "MCP input/output log reads are disabled for this server session.",
+                                suggestion: "Ask the user to export logs from the ProxyPilot app or CLI, or restart MCP with \(MCPIOSessionLogConsent.environmentVariable)=1 before retrying with explicit per-call consent."
+                            )
+                        }
+                        guard params.arguments?[MCPIOSessionLogConsent.argumentName]?.boolValue == true else {
+                            return toolError(
+                                tool: "get_session_history",
+                                code: "E062_IO_LOG_READ_NOT_ALLOWED",
+                                message: "get_session_history include_logs requires explicit per-call confirmation.",
+                                suggestion: "After the user confirms exposing decrypted prompts and outputs for this session, retry with \(MCPIOSessionLogConsent.argumentName): true."
+                            )
+                        }
                         if let recorder = try? InputOutputLoggingRecorder.productionIfKeyExists(source: "mcp") {
+                            try? await recorder.pruneExpired()
                             logs = (try? await recorder.readRecords(matchingSessionID: sessionID)) ?? []
                         } else {
                             logs = []

@@ -44,6 +44,36 @@ enum LocalProxyServerHelpers {
 
     /// Compact, deterministic byte-count display for log lines and the
     /// context-compaction stats UI ("118.4 KB", "312 B").
+    // MARK: - Body Length
+
+    /// How a request's declared `Content-Length` should be handled.
+    enum ContentLengthOutcome: Equatable {
+        case accept(Int)
+        case invalid
+        case tooLarge
+    }
+
+    /// Validate the declared body length before any of it is sliced off.
+    ///
+    /// A negative value must be rejected here: the caller passes this length to
+    /// `prefix(_:)`, whose `maxLength >= 0` precondition traps the process, and
+    /// that slice runs *before* the authorization gate — so `Content-Length: -1`
+    /// from any local client would otherwise be an unauthenticated crash.
+    ///
+    /// An absent or unparseable header keeps its historical meaning of "no
+    /// body" rather than becoming an error, so only an explicitly negative
+    /// length is rejected.
+    static func contentLengthOutcome(
+        header: String?,
+        alreadyReceived: Int,
+        maxBodyBytes: Int
+    ) -> ContentLengthOutcome {
+        let declared = header.flatMap(Int.init) ?? 0
+        if declared < 0 { return .invalid }
+        if declared > maxBodyBytes || alreadyReceived > maxBodyBytes { return .tooLarge }
+        return .accept(declared)
+    }
+
     static func formatByteCount(_ bytes: Int) -> String {
         guard bytes >= 1024 else { return "\(bytes) B" }
         let kb = Double(bytes) / 1024.0
@@ -185,7 +215,7 @@ enum LocalProxyServerHelpers {
            body.localizedCaseInsensitiveContains("thought_signature") {
             return "Google direct rejected the tool-call continuation due to thought_signature validation. If this persists, use OpenRouter as the current workaround."
         }
-        return "Upstream error: \(body)"
+        return "Upstream error: \(SensitiveTextSanitizer.sanitize(body, maxCharacters: 600))"
     }
 
     static func githubCopilotEntitlementMessage(
@@ -235,12 +265,7 @@ enum LocalProxyServerHelpers {
     /// Redact a string for log output: scrub bearer tokens and API key values,
     /// then truncate to the given limit.
     static func redact(_ text: String, max limit: Int = 180) -> String {
-        let cleaned = text
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-        let tokenScrubbed = scrubKeyValueSecrets(in: scrubBearer(in: cleaned))
-        if tokenScrubbed.count <= limit { return tokenScrubbed }
-        return String(tokenScrubbed.prefix(limit)) + "..."
+        SensitiveTextSanitizer.sanitize(text, maxCharacters: limit)
     }
 
     static func sessionStartLogLine(
@@ -249,8 +274,8 @@ enum LocalProxyServerHelpers {
         preferredModel: String,
         upstreamBaseURL: String
     ) -> String {
-        let models = modelIDs.sorted().joined(separator: ",")
-        let preferred = preferredModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let models = redact(modelIDs.sorted().joined(separator: ","), max: 512)
+        let preferred = redact(preferredModel, max: 180)
         return "=== session start === provider=\(provider.rawValue) models=\(models.isEmpty ? "(none)" : models) preferred=\(preferred.isEmpty ? "(none)" : preferred) upstream=\(redact(upstreamBaseURL))"
     }
 
@@ -325,13 +350,21 @@ enum LocalProxyServerHelpers {
 
     /// Returns `true` when the request body's model field is allowed (or the
     /// allowlist is empty, which means "allow all").
-    static func isModelAllowed(body: Data, allowedModels: Set<String>) -> Bool {
+    static func isModelAllowed(
+        body: Data,
+        allowedModels: Set<String>,
+        activeModel: String = ""
+    ) -> Bool {
         if allowedModels.isEmpty { return true }
         guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
               let model = json["model"] as? String else {
             return true // can't parse → let the upstream decide
         }
-        return ActiveModelAlias.accepts(model, allowedModels: allowedModels)
+        return ActiveModelAlias.accepts(
+            model,
+            allowedModels: allowedModels,
+            activeModel: activeModel
+        )
     }
 
     // MARK: - Error Response JSON Builders

@@ -47,7 +47,19 @@ public final class FileSecretsProvider: SecretsProvider, @unchecked Sendable {
 
     private func save(_ store: [String: String]) throws {
         let dir = filePath.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: dir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        // `.atomic` writes a umask-permissioned temp file into this directory and
+        // renames it, so the final chmod below cannot protect the window in which
+        // the temp file exists. Keeping the directory itself owner-only closes it.
+        // Applied unconditionally because the directory may pre-date this call.
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: dir.path
+        )
         let data = try JSONEncoder().encode(store)
         try data.write(to: filePath, options: .atomic)
         try FileManager.default.setAttributes(

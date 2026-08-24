@@ -1,5 +1,6 @@
 import ArgumentParser
 import Foundation
+import ProxyPilotCore
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
@@ -41,7 +42,7 @@ struct UpdateCommand: AsyncParsableCommand {
     mutating func run() async throws {
         let currentVersion = ProxyPilotCommand.configuration.version
 
-        let manifest: VersionsManifest
+        let manifest: CLIUpdateManifest
         do {
             manifest = try await fetchManifest()
         } catch {
@@ -162,18 +163,47 @@ struct UpdateCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
+        let release: CLIUpdateRelease
+        do {
+            release = try manifest.release(for: targetVersion)
+        } catch {
+            OutputFormatter.error(
+                command: "update",
+                code: "E028",
+                message: "Update metadata is not trusted: \(error.localizedDescription)",
+                suggestion: "Wait for a signed release manifest or install from an independently verified artifact.",
+                json: json
+            )
+            throw ExitCode.failure
+        }
+
         let binaryURL = Self.downloadsBaseURL.appendingPathComponent("proxypilot-v\(targetVersion)")
         let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("proxypilot-update-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
 
+        let binaryData: Data
         do {
-            try await downloadBinary(from: binaryURL, to: tempURL)
+            binaryData = try await downloadBinary(from: binaryURL)
         } catch {
             OutputFormatter.error(
                 command: "update",
                 code: "E023",
                 message: "Failed to download v\(targetVersion): \(error.localizedDescription)",
                 suggestion: "Retry later or verify downloads are reachable.",
+                json: json
+            )
+            throw ExitCode.failure
+        }
+
+        do {
+            try CLIUpdateArtifactStager.stage(data: binaryData, release: release, at: tempURL)
+        } catch {
+            OutputFormatter.error(
+                command: "update",
+                code: "E028",
+                message: "Downloaded update failed integrity verification: \(error.localizedDescription)",
+                suggestion: "Do not install this artifact. Retry later or report the manifest mismatch.",
                 json: json
             )
             throw ExitCode.failure
@@ -211,7 +241,7 @@ struct UpdateCommand: AsyncParsableCommand {
         )
     }
 
-    private func fetchManifest() async throws -> VersionsManifest {
+    private func fetchManifest() async throws -> CLIUpdateManifest {
         let request = URLRequest(url: Self.manifestURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
         let (data, response) = try await Self.updateSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -220,7 +250,7 @@ struct UpdateCommand: AsyncParsableCommand {
         guard (200...299).contains(http.statusCode) else {
             throw UpdateError.badStatus(http.statusCode)
         }
-        return try JSONDecoder().decode(VersionsManifest.self, from: data)
+        return try JSONDecoder().decode(CLIUpdateManifest.self, from: data)
     }
 
     private func resolveInstallURL() throws -> URL {
@@ -248,9 +278,7 @@ struct UpdateCommand: AsyncParsableCommand {
         throw UpdateError.cannotResolveInstallPath
     }
 
-    private func downloadBinary(from sourceURL: URL, to destinationURL: URL) async throws {
-        defer { try? FileManager.default.removeItem(at: destinationURL) }
-
+    private func downloadBinary(from sourceURL: URL) async throws -> Data {
         let request = URLRequest(url: sourceURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         let (data, response) = try await Self.updateSession.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -262,9 +290,7 @@ struct UpdateCommand: AsyncParsableCommand {
         guard !data.isEmpty else {
             throw UpdateError.emptyDownload
         }
-
-        try data.write(to: destinationURL, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destinationURL.path)
+        return data
     }
 
     private func installBinary(from sourceURL: URL, to installURL: URL) throws {
@@ -337,10 +363,6 @@ struct UpdateCommand: AsyncParsableCommand {
             if l > r { return .orderedDescending }
         }
         return .orderedSame
-    }
-
-    private struct VersionsManifest: Decodable {
-        let latest: String
     }
 
     private struct UpdatePayload: Encodable {

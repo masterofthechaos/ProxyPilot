@@ -68,7 +68,7 @@ final class ProviderManager: ObservableObject {
 
     @Published var upstreamAPIBaseURLString: String = UpstreamProvider.zAI.defaultAPIBaseURL {
         didSet {
-            guard isInitialized else { return }
+            guard isInitialized, !isResettingUpstreamAPIBaseURL else { return }
             let key = "proxypilot.upstreamAPIBaseURL.\(upstreamProvider.rawValue)"
             defaults.set(upstreamAPIBaseURLString, forKey: key)
         }
@@ -123,6 +123,7 @@ final class ProviderManager: ObservableObject {
     // MARK: - Internal State
 
     var isInitialized = false
+    private var isResettingUpstreamAPIBaseURL = false
     private var upstreamModelsByID: [String: UpstreamModel] = [:]
     private var upstreamModelsByLowercasedID: [String: UpstreamModel] = [:]
 
@@ -276,7 +277,7 @@ final class ProviderManager: ObservableObject {
             }
         }
 
-        if verifiedFilterEnabled && upstreamProvider == .openRouter && !verifiedModels.isEmpty {
+        if verifiedFilterEnabled && upstreamProvider == .openRouter {
             models = models.filter { verifiedModels.contains($0.id) }
         }
 
@@ -435,7 +436,7 @@ final class ProviderManager: ObservableObject {
             defaults.set(savedDefaultModels, forKey: Self.defaultModelsKey(for: upstreamProvider))
         }
         selectedUpstreamModels.formUnion(savedDefaultModelSet)
-        if upstreamProvider.isLocal {
+        if upstreamProvider.autoSelectDiscoveredModels {
             selectedUpstreamModels.formUnion(models.map(\.id))
         }
         reconcileXcodeAgentModelSelection()
@@ -534,7 +535,10 @@ final class ProviderManager: ObservableObject {
             ?? activeProvider.fallbackModelIDs?.first
             ?? ""
         guard !models.isEmpty else { return fallback }
-        let lowerToOriginal = Dictionary(uniqueKeysWithValues: models.map { ($0.lowercased(), $0) })
+        var lowerToOriginal: [String: String] = [:]
+        for model in models where lowerToOriginal[model.lowercased()] == nil {
+            lowerToOriginal[model.lowercased()] = model
+        }
         for preferred in hints {
             if let match = lowerToOriginal[preferred.lowercased()] {
                 return match
@@ -575,6 +579,8 @@ final class ProviderManager: ObservableObject {
 
     func resetUpstreamAPIBaseURL() {
         defaults.removeObject(forKey: "proxypilot.upstreamAPIBaseURL.\(upstreamProvider.rawValue)")
+        isResettingUpstreamAPIBaseURL = true
+        defer { isResettingUpstreamAPIBaseURL = false }
         upstreamAPIBaseURLString = selectedUpstreamProviderDefaultAPIBaseURL
         onClearIssue?()
     }
@@ -651,9 +657,6 @@ final class ProviderManager: ObservableObject {
             if let preferredLiveModel = caseInsensitiveMatch(in: liveModelIDs, for: preferred) {
                 candidates.insert(preferredLiveModel)
             }
-            if candidates.isEmpty, let firstLiveModel = liveModelIDs.sorted().first {
-                candidates.insert(firstLiveModel)
-            }
             return candidates.sorted()
         }
 
@@ -665,9 +668,6 @@ final class ProviderManager: ObservableObject {
         let selected = selectedXcodeAgentModel.trimmingCharacters(in: .whitespacesAndNewlines)
         if let selectedFallbackModel = caseInsensitiveMatch(in: fallback, for: selected) {
             candidates.insert(selectedFallbackModel)
-        }
-        if candidates.isEmpty, !fallback.isEmpty {
-            candidates.formUnion(fallback)
         }
         return candidates.sorted()
     }

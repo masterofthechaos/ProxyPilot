@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 @MainActor
@@ -652,10 +653,12 @@ final class CopilotSidecarService {
         arguments: [String],
         logURL: URL
     ) throws -> DirectProcessLaunch {
-        let fileManager = FileManager.default
-        fileManager.createFile(atPath: logURL.path, contents: nil)
-        let logHandle = try FileHandle(forWritingTo: logURL)
-        try logHandle.seekToEnd()
+        let descriptor = open(logURL.path, O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        let logHandle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logURL.path)
 
         let newProcess = Process()
         newProcess.executableURL = executable

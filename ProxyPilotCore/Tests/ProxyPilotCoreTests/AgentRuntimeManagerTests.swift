@@ -55,7 +55,7 @@ private func makeRuntimeFixture() throws -> (
     #expect(release.adapterVersion == "0.44.0")
     #expect(release.nodeArchives["arm64"]?.sha256.count == 64)
     #expect(release.nodeArchives["x86_64"]?.sha256.count == 64)
-    #expect(release.adapterIntegrity.hasPrefix("sha512-"))
+    #expect(release.adapterIntegrity == "sha512-FWET6TS3XpVgm4xhPtxzPJACNBK+O1rWnZ+6ZDA1vvtxy9KmAu6yGCDSGSsPeArEcouc8u69iuNW4vLaUELNcw==")
 }
 
 @Test func executableLinksInstallAndRefreshStaleTargets() throws {

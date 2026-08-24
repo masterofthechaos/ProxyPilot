@@ -1295,7 +1295,23 @@ struct SessionHistoryView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
         do {
-            try content.write(to: url, atomically: true, encoding: .utf8)
+            let temporaryURL = url.deletingLastPathComponent()
+                .appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+            let data = Data(content.utf8)
+            guard FileManager.default.createFile(
+                atPath: temporaryURL.path,
+                contents: data,
+                attributes: [.posixPermissions: 0o600]
+            ) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            defer { try? FileManager.default.removeItem(at: temporaryURL) }
+            if FileManager.default.fileExists(atPath: url.path) {
+                _ = try FileManager.default.replaceItemAt(url, withItemAt: temporaryURL)
+            } else {
+                try FileManager.default.moveItem(at: temporaryURL, to: url)
+            }
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
             fileExportStatus = "Exported session to \(url.path)"
         } catch {
             fileExportStatus = "Export failed: \(error.localizedDescription)"

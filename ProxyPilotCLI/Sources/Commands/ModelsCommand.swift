@@ -58,11 +58,33 @@ struct ModelsCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
 
-        // Resolve API key
+        if let url {
+            guard let components = URLComponents(string: url),
+                  let scheme = components.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  components.host != nil,
+                  components.user == nil,
+                  components.password == nil,
+                  components.query == nil,
+                  components.fragment == nil else {
+                OutputFormatter.error(
+                    command: "models",
+                    code: "E036",
+                    message: "Invalid --url. Use an absolute http(s) base URL with no userinfo, query, or fragment.",
+                    json: json
+                )
+                throw ExitCode.failure
+            }
+        }
+
+        // Stored credentials are scoped to the provider's configured endpoint.
+        // An arbitrary override only receives a key the caller supplied explicitly.
         let secrets = SecretsProviderFactory.make()
         let secretKeyName = upstream.secretKey
         let apiKey: String? = if let key {
             key
+        } else if url != nil {
+            nil
         } else if let secretKeyName {
             ProcessInfo.processInfo.environment[secretKeyName]
                 ?? (try? secrets.get(key: secretKeyName))
@@ -78,7 +100,9 @@ struct ModelsCommand: AsyncParsableCommand {
                 command: "models",
                 code: "E004",
                 message: "No API key found for provider \(upstream.rawValue).",
-                suggestion: "Run 'proxypilot auth set --provider \(upstream.rawValue)', pass --key, or set \(secretKeyName ?? "the provider env var").",
+                suggestion: url == nil
+                    ? "Run 'proxypilot auth set --provider \(upstream.rawValue)', pass --key, or set \(secretKeyName ?? "the provider env var")."
+                    : "Pass --key explicitly for a custom --url, or omit --url to use the stored provider credential.",
                 json: json
             )
             throw ExitCode.failure

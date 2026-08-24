@@ -706,9 +706,11 @@ private func assertGoogleSchemaSanitized(provider: UpstreamProvider, model: Stri
     let line = """
     data: {"choices":[{"delta":{"role":"","content":"hi"}}],"model":"MiniMax-M2.5"}
     """
+    var context = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
     let normalized = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
         line,
-        provider: .miniMax
+        provider: .miniMax,
+        context: &context
     )
     #expect(normalized.hasPrefix("data: "))
     let jsonStr = String(normalized.dropFirst(6))
@@ -718,16 +720,127 @@ private func assertGoogleSchemaSanitized(provider: UpstreamProvider, model: Stri
     #expect(delta["role"] as? String == "assistant")
 }
 
-@Test func miniMaxStreamingLineDoesNotSynthesizeID() throws {
-    let line = #"data: {"choices":[{"delta":{"content":"hi"}}],"model":"MiniMax-M2.5"}"#
-    let normalized = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
-        line,
-        provider: .miniMax
+@Test func miniMaxStreamingLinesSynthesizeOneStableIDPerContext() throws {
+    var context = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+    let first = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"choices":[{"delta":{"content":"first"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
     )
-    let jsonStr = String(normalized.dropFirst(6))
-    let json = try #require(JSONSerialization.jsonObject(with: Data(jsonStr.utf8)) as? [String: Any])
-    // Streaming line normalizer must NOT synthesize an id — callers manage stream-wide ids.
-    #expect(json["id"] == nil)
+    let second = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"choices":[{"delta":{"content":"second"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
+    )
+
+    let firstJSON = try #require(JSONSerialization.jsonObject(with: Data(first.dropFirst(6).utf8)) as? [String: Any])
+    let secondJSON = try #require(JSONSerialization.jsonObject(with: Data(second.dropFirst(6).utf8)) as? [String: Any])
+    let firstID = try #require(firstJSON["id"] as? String)
+    let secondID = try #require(secondJSON["id"] as? String)
+    #expect(!firstID.isEmpty)
+    #expect(firstID == secondID)
+}
+
+@Test func miniMaxStreamingNormalizationContextsUseDistinctSynthesizedIDs() throws {
+    var firstContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+    var secondContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+    let line = #"data: {"choices":[{"delta":{"content":"hi"}}],"model":"MiniMax-M2.5"}"#
+
+    let first = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        line,
+        provider: .miniMax,
+        context: &firstContext
+    )
+    let second = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        line,
+        provider: .miniMax,
+        context: &secondContext
+    )
+
+    let firstJSON = try #require(JSONSerialization.jsonObject(with: Data(first.dropFirst(6).utf8)) as? [String: Any])
+    let secondJSON = try #require(JSONSerialization.jsonObject(with: Data(second.dropFirst(6).utf8)) as? [String: Any])
+    let firstID = try #require(firstJSON["id"] as? String)
+    let secondID = try #require(secondJSON["id"] as? String)
+    #expect(!firstID.isEmpty)
+    #expect(!secondID.isEmpty)
+    #expect(firstID != secondID)
+}
+
+@Test func miniMaxProviderIDSeedsLaterIDLessChunks() throws {
+    var context = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+    let providerChunk = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"id":"chatcmpl-provider-id","choices":[{"delta":{"content":"hi"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
+    )
+    let missingIDChunk = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"choices":[{"delta":{"content":"there"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
+    )
+
+    let providerJSON = try #require(JSONSerialization.jsonObject(with: Data(providerChunk.dropFirst(6).utf8)) as? [String: Any])
+    let missingIDJSON = try #require(JSONSerialization.jsonObject(with: Data(missingIDChunk.dropFirst(6).utf8)) as? [String: Any])
+    #expect(providerJSON["id"] as? String == "chatcmpl-provider-id")
+    #expect(missingIDJSON["id"] as? String == "chatcmpl-provider-id")
+}
+
+@Test func miniMaxSynthesizedIDOverridesLaterProviderIDAcrossWholeStream() throws {
+    var context = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+    let firstMissingIDChunk = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"choices":[{"delta":{"content":"first"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
+    )
+    let providerChunk = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"id":"chatcmpl-provider-id","choices":[{"delta":{"content":"provider"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
+    )
+    let secondMissingIDChunk = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"choices":[{"delta":{"content":"last"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
+    )
+
+    let firstMissingIDJSON = try #require(JSONSerialization.jsonObject(with: Data(firstMissingIDChunk.dropFirst(6).utf8)) as? [String: Any])
+    let providerJSON = try #require(JSONSerialization.jsonObject(with: Data(providerChunk.dropFirst(6).utf8)) as? [String: Any])
+    let secondMissingIDJSON = try #require(JSONSerialization.jsonObject(with: Data(secondMissingIDChunk.dropFirst(6).utf8)) as? [String: Any])
+    let synthesizedID = try #require(firstMissingIDJSON["id"] as? String)
+    #expect(synthesizedID.hasPrefix("chatcmpl-minimax-"))
+    #expect(providerJSON["id"] as? String == synthesizedID)
+    #expect(secondMissingIDJSON["id"] as? String == synthesizedID)
+}
+
+@Test func miniMaxExplicitNullIDIsReplacedWithStreamID() throws {
+    // A literal `"id":null` satisfied neither branch of the normalizer: the key
+    // exists, so the `== nil` test was false, while `as? String` failed. The
+    // chunk shipped with `"id":null`, which is harder for a strict OpenAI
+    // decoder than the absent key this normalizer exists to repair.
+    var context = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+    let nullIDChunk = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"id":null,"choices":[{"delta":{"content":"hi"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
+    )
+
+    let json = try #require(JSONSerialization.jsonObject(with: Data(nullIDChunk.dropFirst(6).utf8)) as? [String: Any])
+    let id = try #require(json["id"] as? String, "A null id must be replaced with the synthesized stream id")
+    #expect(id.hasPrefix("chatcmpl-minimax-"))
+    #expect(!(json["id"] is NSNull))
+}
+
+@Test func miniMaxEmptyStringIDIsReplacedWithStreamID() throws {
+    var context = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
+    let emptyIDChunk = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
+        #"data: {"id":"","choices":[{"delta":{"content":"hi"}}],"model":"MiniMax-M2.5"}"#,
+        provider: .miniMax,
+        context: &context
+    )
+
+    let json = try #require(JSONSerialization.jsonObject(with: Data(emptyIDChunk.dropFirst(6).utf8)) as? [String: Any])
+    let id = try #require(json["id"] as? String)
+    #expect(id.hasPrefix("chatcmpl-minimax-"))
 }
 
 @Test func miniMaxBufferedResponseWithEmptyRoleIsNormalized() throws {

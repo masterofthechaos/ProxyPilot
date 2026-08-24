@@ -26,12 +26,10 @@ public enum ContextCompactionEngine {
         /// (fail-open passthrough).
         public let body: String?
         public let matchedRuleIDs: [String]
-        public let unmatchedAnchors: [String]
 
-        public init(body: String?, matchedRuleIDs: [String] = [], unmatchedAnchors: [String] = []) {
+        public init(body: String?, matchedRuleIDs: [String] = []) {
             self.body = body
             self.matchedRuleIDs = matchedRuleIDs
-            self.unmatchedAnchors = unmatchedAnchors
         }
     }
 
@@ -70,18 +68,15 @@ public enum ContextCompactionEngine {
         // previous match. Rules whose anchors are missing (or appear out
         // of order) simply don't participate.
         var located: [(rule: ContextCompactionRule, range: Range<String.Index>)] = []
-        var unmatchedAnchors: [String] = []
         var searchStart = body.startIndex
         for rule in ruleset.rules {
             if let anchorRange = body.range(of: rule.startAnchor, range: searchStart..<body.endIndex) {
                 located.append((rule: rule, range: anchorRange))
                 searchStart = anchorRange.upperBound
-            } else {
-                unmatchedAnchors.append(rule.startAnchor)
             }
         }
         guard !located.isEmpty else {
-            return Result(body: nil, unmatchedAnchors: unmatchedAnchors)
+            return Result(body: nil)
         }
 
         var output = String(body[..<located[0].range.lowerBound])
@@ -98,9 +93,9 @@ public enum ContextCompactionEngine {
         }
 
         guard !matchedRuleIDs.isEmpty else {
-            return Result(body: nil, unmatchedAnchors: unmatchedAnchors)
+            return Result(body: nil)
         }
-        return Result(body: output, matchedRuleIDs: matchedRuleIDs, unmatchedAnchors: unmatchedAnchors)
+        return Result(body: output, matchedRuleIDs: matchedRuleIDs)
     }
 
     /// CRLF → LF only. No other normalization: hashes must stay pinned to

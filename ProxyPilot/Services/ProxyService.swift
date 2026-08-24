@@ -3,6 +3,10 @@ import ProxyPilotCore
 
 @MainActor
 final class ProxyService {
+    struct ProbeResult: Equatable {
+        let statusCode: Int
+        let isProxyPilot: Bool
+    }
     struct CopilotToolCallProbeResult: Equatable {
         let sawToolCall: Bool
         let summary: String
@@ -13,11 +17,14 @@ final class ProxyService {
     }
 
     func readLogTail(from logFile: URL, maxBytes: Int = 32_000) -> String {
-        guard let data = try? Data(contentsOf: logFile) else { return "" }
-        if data.count <= maxBytes {
-            return String(decoding: data, as: UTF8.self)
-        }
-        return String(decoding: data.suffix(maxBytes), as: UTF8.self)
+        guard maxBytes > 0,
+              let handle = try? FileHandle(forReadingFrom: logFile) else { return "" }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let start = size > UInt64(maxBytes) ? size - UInt64(maxBytes) : 0
+        try? handle.seek(toOffset: start)
+        let data = (try? handle.read(upToCount: maxBytes)) ?? nil
+        return data.map { String(decoding: $0, as: UTF8.self) } ?? ""
     }
 
     func normalizedUpstreamAPIBase(from raw: String) -> URL? {
@@ -82,7 +89,7 @@ final class ProxyService {
         return String(decoding: data, as: UTF8.self)
     }
 
-    func probe(baseURL: URL) async throws -> Int {
+    func probe(baseURL: URL) async throws -> ProbeResult {
         // We only care that something is listening and responding. Auth errors are still "up".
         let url = baseURL.appendingPathComponent("v1/models")
         var request = URLRequest(url: url)
@@ -91,9 +98,12 @@ final class ProxyService {
 
         let (_, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse {
-            return http.statusCode
+            return ProbeResult(
+                statusCode: http.statusCode,
+                isProxyPilot: http.value(forHTTPHeaderField: "X-ProxyPilot-Server") == "1"
+            )
         }
-        return 0
+        return ProbeResult(statusCode: 0, isProxyPilot: false)
     }
 
     func fetchUpstreamModels(
@@ -245,9 +255,21 @@ final class ProxyService {
         model: String
     ) async throws -> CopilotToolCallProbeResult {
         let request = try Self.githubCopilotToolCallProbeRequest(apiBase: apiBase, model: model)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        let maximumProbeBytes = 1_048_576
+        var data = Data()
+        data.reserveCapacity(min(maximumProbeBytes, 64 * 1024))
+        for try await byte in bytes {
+            guard data.count < maximumProbeBytes else {
+                throw ProxyServiceError.responseTooLarge
+            }
+            data.append(byte)
+        }
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            let bodyText = SensitiveTextSanitizer.sanitize(
+                String(decoding: data, as: UTF8.self),
+                maxCharacters: 2_048
+            )
             throw ProxyServiceError.httpStatus(http.statusCode, bodyText)
         }
         return Self.parseGitHubCopilotToolCallProbeResponse(data)
@@ -486,6 +508,7 @@ private struct ChatCompletionResponse: Decodable {
 
 enum ProxyServiceError: LocalizedError {
     case httpStatus(Int, String)
+    case responseTooLarge
 
     var errorDescription: String? {
         switch self {
@@ -494,6 +517,8 @@ enum ProxyServiceError: LocalizedError {
                 return "HTTP \(status)"
             }
             return "HTTP \(status): \(body)"
+        case .responseTooLarge:
+            return "Copilot tool-call probe exceeded the 1 MiB response limit"
         }
     }
 }

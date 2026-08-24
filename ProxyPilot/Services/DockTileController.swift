@@ -58,8 +58,12 @@ struct ProxyPilotDockPresentation: Equatable {
 }
 
 enum ProxyPilotDockModelName {
+    static let maximumInputCharacters = 256
+    static let maximumLabelCharacters = 32
+
     static func normalize(_ rawValue: String) -> String {
-        var value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var value = String(rawValue.prefix(maximumInputCharacters))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return "" }
 
         if value.lowercased().hasSuffix(":exacto") {
@@ -75,9 +79,10 @@ enum ProxyPilotDockModelName {
 
         let supported = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._:+ ")
         value = String(value.map { supported.contains($0) ? $0 : " " })
-        return value
+        let normalized = value
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
+        return String(normalized.prefix(maximumLabelCharacters))
     }
 }
 

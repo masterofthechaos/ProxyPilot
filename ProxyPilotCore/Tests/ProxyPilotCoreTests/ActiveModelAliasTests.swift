@@ -4,10 +4,11 @@ import Testing
 
 @Suite struct ActiveModelAliasTests {
     @Test func aliasRequiresAnActiveAllowlist() {
-        #expect(ActiveModelAlias.accepts(ActiveModelAlias.id, allowedModels: ["actual-model"]))
-        #expect(!ActiveModelAlias.accepts(ActiveModelAlias.id, allowedModels: []))
-        #expect(ActiveModelAlias.accepts("actual-model", allowedModels: ["actual-model"]))
-        #expect(!ActiveModelAlias.accepts("other", allowedModels: ["actual-model"]))
+        #expect(ActiveModelAlias.accepts(ActiveModelAlias.id, allowedModels: ["actual-model"], activeModel: "actual-model"))
+        #expect(!ActiveModelAlias.accepts(ActiveModelAlias.id, allowedModels: [], activeModel: "actual-model"))
+        #expect(!ActiveModelAlias.accepts(ActiveModelAlias.id, allowedModels: ["allowed"], activeModel: "disallowed"))
+        #expect(ActiveModelAlias.accepts("actual-model", allowedModels: ["actual-model"], activeModel: ""))
+        #expect(!ActiveModelAlias.accepts("other", allowedModels: ["actual-model"], activeModel: ""))
     }
 
     @Test func rewritesAliasAndNeverChangesLiteralModels() throws {

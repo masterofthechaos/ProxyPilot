@@ -294,15 +294,36 @@ public struct AgentRuntimeManager: Sendable {
         guard fileManager.isExecutableFile(atPath: npm.path) else {
             throw AgentRuntimeManagerError.installedRuntimeInvalid("npm is missing from the Node archive.")
         }
-        var npmEnvironment = ProcessInfo.processInfo.environment
-        npmEnvironment["PATH"] = "\(staging.appendingPathComponent("bin").path):/usr/bin:/bin"
-        npmEnvironment["HOME"] = FileManager.default.homeDirectoryForCurrentUser.path
+        let npmEnvironment = Self.hardenedNPMEnvironment(nodeRoot: staging, home: parent)
+        let packedAdapterDirectory = staging.appendingPathComponent("proxypilot-adapter-pack", isDirectory: true)
+        try fileManager.createDirectory(at: packedAdapterDirectory, withIntermediateDirectories: true)
+        let packResult = try Self.runProcess(
+            executable: npm,
+            arguments: [
+                "pack", "--pack-destination", packedAdapterDirectory.path,
+                "--ignore-scripts", "--loglevel=error",
+                "\(release.adapterPackage)@\(release.adapterVersion)",
+            ],
+            environment: npmEnvironment,
+            logURL: logURL
+        )
+        guard packResult.status == 0 else {
+            throw AgentRuntimeManagerError.npmInstallFailed(packResult.output)
+        }
+        let packedAdapter = try Self.singlePackedAdapter(in: packedAdapterDirectory)
+        let adapterIntegrity = try Self.sha512SRI(of: packedAdapter)
+        guard adapterIntegrity == release.adapterIntegrity else {
+            throw AgentRuntimeManagerError.npmInstallFailed(
+                "Pinned adapter integrity mismatch (expected \(release.adapterIntegrity), got \(adapterIntegrity))."
+            )
+        }
+
         let npmResult = try Self.runProcess(
             executable: npm,
             arguments: [
                 "install", "--global", "--prefix", staging.path,
-                "--omit=dev", "--no-audit", "--no-fund", "--loglevel=error",
-                "\(release.adapterPackage)@\(release.adapterVersion)",
+                "--omit=dev", "--no-audit", "--no-fund", "--ignore-scripts", "--loglevel=error",
+                packedAdapter.path,
             ],
             environment: npmEnvironment,
             logURL: logURL
@@ -310,6 +331,7 @@ public struct AgentRuntimeManager: Sendable {
         guard npmResult.status == 0 else {
             throw AgentRuntimeManagerError.npmInstallFailed(npmResult.output)
         }
+        try? fileManager.removeItem(at: packedAdapterDirectory)
 
         let stagedLayout = ManagedAgentRuntimeLayout(
             root: staging,
@@ -389,6 +411,38 @@ public struct AgentRuntimeManager: Sendable {
     private static func sha256(of url: URL) throws -> String {
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func sha512SRI(of url: URL) throws -> String {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        return "sha512-" + Data(SHA512.hash(data: data)).base64EncodedString()
+    }
+
+    private static func singlePackedAdapter(in directory: URL) throws -> URL {
+        let tarballs = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "tgz" }
+        guard tarballs.count == 1, let tarball = tarballs.first else {
+            throw AgentRuntimeManagerError.npmInstallFailed(
+                "Expected one packed adapter tarball, found \(tarballs.count)."
+            )
+        }
+        return tarball
+    }
+
+    private static func hardenedNPMEnvironment(nodeRoot: URL, home: URL) -> [String: String] {
+        [
+            "PATH": "\(nodeRoot.appendingPathComponent("bin").path):/usr/bin:/bin",
+            "HOME": home.path,
+            "NPM_CONFIG_AUDIT": "false",
+            "NPM_CONFIG_FUND": "false",
+            "NPM_CONFIG_CACHE": home.appendingPathComponent(".npm-cache", isDirectory: true).path,
+            "NPM_CONFIG_GLOBALCONFIG": "/dev/null",
+            "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+            "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org/",
+            "NPM_CONFIG_USERCONFIG": "/dev/null",
+        ]
     }
 
     private static func runProcess(

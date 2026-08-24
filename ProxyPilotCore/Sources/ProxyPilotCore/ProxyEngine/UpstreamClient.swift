@@ -123,6 +123,8 @@ enum UpstreamClient {
     /// line. Error statuses (>= 400) accumulate the body and finish by
     /// throwing `UpstreamError.httpError`, mirroring the Darwin path.
     private final class LineStreamingBridge: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private static let maximumBufferedLineBytes = 1_048_576
+        private static let maximumErrorBodyBytes = 1_048_576
         private let continuation: AsyncThrowingStream<Data, Error>.Continuation
         private var buffer = Data()
         private var errorBody = Data()
@@ -146,10 +148,20 @@ enum UpstreamClient {
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
             guard statusCode < 400 else {
-                errorBody.append(data)
+                let remaining = max(0, Self.maximumErrorBodyBytes - errorBody.count)
+                errorBody.append(data.prefix(remaining))
+                if data.count > remaining {
+                    dataTask.cancel()
+                    continuation.finish(throwing: UpstreamError.invalidResponse)
+                }
                 return
             }
             buffer.append(data)
+            guard buffer.count <= Self.maximumBufferedLineBytes else {
+                dataTask.cancel()
+                continuation.finish(throwing: UpstreamError.invalidResponse)
+                return
+            }
             while let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) {
                 let afterNewline = buffer.index(after: newlineIndex)
                 continuation.yield(buffer.subdata(in: buffer.startIndex..<afterNewline))

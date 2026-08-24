@@ -237,9 +237,7 @@ struct CustomizationView: View {
                     }
                 }
 
-                ForEach(vm.menuBarSectionOrder.filter {
-                    vm.repoGPSRoutingFeatureEnabled || $0 != .repoGPSRoute
-                }) { section in
+                ForEach(menuBarCustomizationOrder) { section in
                     menuBarSectionRow(section)
                 }
 
@@ -269,21 +267,37 @@ struct CustomizationView: View {
             Spacer()
 
             Button {
-                vm.moveMenuBarSection(section, up: true)
+                moveMenuBarSection(section, up: true)
             } label: {
                 Image(systemName: "chevron.up")
             }
-            .disabled(vm.menuBarSectionOrder.first == section)
+            .disabled(menuBarCustomizationOrder.first == section)
             .help("Move \(section.title) up")
 
             Button {
-                vm.moveMenuBarSection(section, up: false)
+                moveMenuBarSection(section, up: false)
             } label: {
                 Image(systemName: "chevron.down")
             }
-            .disabled(vm.menuBarSectionOrder.last == section)
+            .disabled(menuBarCustomizationOrder.last == section)
             .help("Move \(section.title) down")
         }
+    }
+
+    private var menuBarCustomizationOrder: [MenuBarSection] {
+        MenuBarSection.visibleOrder(
+            from: vm.menuBarSectionOrder,
+            excluding: vm.repoGPSRoutingFeatureEnabled ? [] : [.repoGPSRoute]
+        )
+    }
+
+    private func moveMenuBarSection(_ section: MenuBarSection, up: Bool) {
+        vm.menuBarSectionOrder = MenuBarSection.reordered(
+            vm.menuBarSectionOrder,
+            moving: section,
+            up: up,
+            excluding: vm.repoGPSRoutingFeatureEnabled ? [] : [.repoGPSRoute]
+        )
     }
 
     private func keysProviderCustomizationRow(_ item: KeysProviderViewItem) -> some View {

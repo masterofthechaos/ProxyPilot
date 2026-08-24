@@ -223,6 +223,16 @@ public enum UpstreamProvider: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// Whether every discovered model may be selected automatically.
+    /// GitHub Copilot is a local transport to cloud models, so it must retain
+    /// the user's explicit/default allowlist instead of widening on fetch.
+    public var autoSelectDiscoveredModels: Bool {
+        switch self {
+        case .nineRouter, .ollama, .lmStudio: return true
+        default: return false
+        }
+    }
+
     /// Whether this provider requires an API key for authentication.
     public var requiresAPIKey: Bool { !isLocal }
 

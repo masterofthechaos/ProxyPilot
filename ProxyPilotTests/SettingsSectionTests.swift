@@ -52,6 +52,33 @@ final class SettingsSectionTests: XCTestCase {
         XCTAssertFalse(RepoGPSRoutingFeatureFlag.isEnabled(home: home) { _ in false })
     }
 
+    func testMenuBarCustomizationReordersAroundHiddenRepoGPSSection() {
+        let order: [MenuBarSection] = [.statusDetails, .repoGPSRoute, .modelPicker, .sessionStats]
+        let excluded: Set<MenuBarSection> = [.repoGPSRoute]
+
+        XCTAssertEqual(
+            MenuBarSection.visibleOrder(from: order, excluding: excluded),
+            [.statusDetails, .modelPicker, .sessionStats]
+        )
+        XCTAssertEqual(
+            MenuBarSection.reordered(order, moving: .statusDetails, up: false, excluding: excluded),
+            [.modelPicker, .repoGPSRoute, .statusDetails, .sessionStats]
+        )
+        XCTAssertEqual(
+            MenuBarSection.reordered(order, moving: .sessionStats, up: true, excluding: excluded),
+            [.statusDetails, .repoGPSRoute, .sessionStats, .modelPicker]
+        )
+    }
+
+    func testMenuBarCustomizationReorderingPreservesExistingBehaviorWhenVisible() {
+        let order: [MenuBarSection] = [.statusDetails, .repoGPSRoute, .modelPicker, .sessionStats]
+
+        XCTAssertEqual(
+            MenuBarSection.reordered(order, moving: .modelPicker, up: true),
+            [.statusDetails, .modelPicker, .repoGPSRoute, .sessionStats]
+        )
+    }
+
     func testProxySectionFocusExposesTargetsAndHighlightDuration() {
         XCTAssertEqual(ProxySectionFocus.models.rawValue, "models")
         XCTAssertEqual(ProxySectionFocus.models.highlightDurationSeconds, 4)

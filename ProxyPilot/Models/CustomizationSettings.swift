@@ -118,6 +118,37 @@ enum MenuBarSection: String, CaseIterable, Identifiable {
             return "Check for app updates."
         }
     }
+
+    /// Returns the menu-bar order with feature-gated entries omitted from the
+    /// reorderable surface. The omitted entries remain in their original
+    /// positions when a visible entry is moved.
+    static func visibleOrder(
+        from order: [Self],
+        excluding excluded: Set<Self> = []
+    ) -> [Self] {
+        order.filter { !excluded.contains($0) }
+    }
+
+    /// Moves an entry relative to its visible neighbors while preserving the
+    /// position and identity of entries hidden by a feature gate.
+    static func reordered(
+        _ order: [Self],
+        moving section: Self,
+        up: Bool,
+        excluding excluded: Set<Self> = []
+    ) -> [Self] {
+        let visibleEntries = order.enumerated().filter { !excluded.contains($0.element) }
+        guard let source = visibleEntries.firstIndex(where: { $0.element == section }) else {
+            return order
+        }
+
+        let destination = up ? source - 1 : source + 1
+        guard visibleEntries.indices.contains(destination) else { return order }
+
+        var result = order
+        result.swapAt(visibleEntries[source].offset, visibleEntries[destination].offset)
+        return result
+    }
 }
 
 enum KeysProviderViewItem: String, CaseIterable, Identifiable {

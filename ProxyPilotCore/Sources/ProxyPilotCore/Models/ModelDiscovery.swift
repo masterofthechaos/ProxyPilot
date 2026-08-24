@@ -5,6 +5,18 @@ import FoundationNetworking
 
 public enum ModelDiscovery {
 
+    private final class RejectRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            completionHandler(nil)
+        }
+    }
+
     public enum Error: Swift.Error {
         case invalidJSON
         case httpError(statusCode: Int)
@@ -59,7 +71,13 @@ public enum ModelDiscovery {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await URLSession.shared.data(for: request)
+            let session = URLSession(
+                configuration: .ephemeral,
+                delegate: RejectRedirectDelegate(),
+                delegateQueue: nil
+            )
+            defer { session.invalidateAndCancel() }
+            (data, response) = try await session.data(for: request)
         } catch {
             throw Error.networkError(error)
         }

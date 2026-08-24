@@ -196,10 +196,11 @@ else
     pass "--help hides compatibility subcommand: acp"
 fi
 
-run_test "agent status emits structured JSON"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    run_test "agent status emits structured JSON"
 
-AGENT_STATUS_JSON="$("$BINARY" agent status --json 2>&1)"
-AGENT_STATUS_CHECK="$(python3 - "$AGENT_STATUS_JSON" <<'PY'
+    AGENT_STATUS_JSON="$("$BINARY" agent status --json 2>&1)"
+    AGENT_STATUS_CHECK="$(python3 - "$AGENT_STATUS_JSON" <<'PY'
 import sys, json
 try:
     d = json.loads(sys.argv[1])
@@ -213,11 +214,15 @@ try:
 except Exception as e:
     print("PARSE_ERROR: " + str(e))
 PY
-)"
-if [[ "$AGENT_STATUS_CHECK" == "PASS" ]]; then
-    pass "agent status returns structured JSON: $AGENT_STATUS_JSON"
+    )"
+    if [[ "$AGENT_STATUS_CHECK" == "PASS" ]]; then
+        pass "agent status returns structured JSON: $AGENT_STATUS_JSON"
+    else
+        fail "agent status returns structured JSON" "$AGENT_STATUS_CHECK / $AGENT_STATUS_JSON"
+    fi
 else
-    fail "agent status returns structured JSON" "$AGENT_STATUS_CHECK / $AGENT_STATUS_JSON"
+    run_test "agent status smoke guard on non-macOS"
+    pass "agent status assertions skipped because Agent status is macOS-only"
 fi
 
 run_test "sessions list emits structured JSON"
@@ -1211,6 +1216,13 @@ if grep -q "allow_secret_write" "$PROJECT_DIR/Sources/MCP/MCPServerSetup.swift";
     pass "MCP auth_set documents allow_secret_write"
 else
     fail "MCP auth_set documents allow_secret_write"
+fi
+
+if grep -q "allow_io_log_read" "$PROJECT_DIR/Sources/MCP/MCPServerSetup.swift" && \
+   grep -q "PROXYPILOT_MCP_ALLOW_IO_LOGS" "$PROJECT_DIR/Sources/Support/MCPLifecycleSupport.swift"; then
+    pass "MCP get_session_history documents I/O log read consent gates"
+else
+    fail "MCP get_session_history documents I/O log read consent gates"
 fi
 
 if grep -q "prompt_caching" "$PROJECT_DIR/Sources/MCP/MCPServerSetup.swift"; then

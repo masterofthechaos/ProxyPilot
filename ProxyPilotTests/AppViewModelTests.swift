@@ -18,6 +18,7 @@ final class AppViewModelTests: XCTestCase {
         suiteName = "AppViewModelTests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         setenv("PROXYPILOT_KEYCHAIN_SERVICE", "proxypilot.tests.\(suiteName!)", 1)
+        setenv("PROXYPILOT_LEGACY_KEYCHAIN_SERVICE", "proxypilot.tests.legacy.\(suiteName!)", 1)
     }
 
     override func tearDown() {
@@ -25,6 +26,7 @@ final class AppViewModelTests: XCTestCase {
             UserDefaults().removePersistentDomain(forName: suiteName)
         }
         unsetenv("PROXYPILOT_KEYCHAIN_SERVICE")
+        unsetenv("PROXYPILOT_LEGACY_KEYCHAIN_SERVICE")
         defaults = nil
         suiteName = nil
         super.tearDown()
@@ -54,6 +56,23 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertEqual(vm.activeIssue?.code, .invalidProxyURL)
         XCTAssertTrue(vm.activeIssue?.actions.contains(.resetUpstreamURL) == true)
+    }
+
+    func testResetUpstreamURLRemovesOverrideAndKeepsEffectiveDefault() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.selectBuiltInUpstreamProvider(.openAI)
+        let key = "proxypilot.upstreamAPIBaseURL.\(UpstreamProvider.openAI.rawValue)"
+        vm.upstreamAPIBaseURLString = "https://example.com/v1"
+        XCTAssertEqual(defaults.string(forKey: key), "https://example.com/v1")
+
+        vm.resetUpstreamAPIBaseURL()
+
+        XCTAssertNil(defaults.object(forKey: key))
+        XCTAssertEqual(vm.upstreamAPIBaseURLString, UpstreamProvider.openAI.defaultAPIBaseURL)
+
+        let relaunched = AppViewModel(defaults: defaults)
+        XCTAssertEqual(relaunched.upstreamProvider, .openAI)
+        XCTAssertEqual(relaunched.upstreamAPIBaseURLString, UpstreamProvider.openAI.defaultAPIBaseURL)
     }
 
     func testLiquidGlassAppearanceDefaultsOn() {
@@ -283,16 +302,30 @@ final class AppViewModelTests: XCTestCase {
         }
     }
 
-    func testBuiltInProxyConfigDoesNotRequireLocalAuthForStoredUpstreamKeyWhenAuthDisabled() throws {
+    func testBuiltInProxyConfigRequiresMasterKeyForStoredUpstreamKeyWhenAuthDisabled() throws {
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
+        let vm = AppViewModel(defaults: defaults)
+        vm.requireLocalAuth = false
+
+        XCTAssertThrowsError(try vm.buildBuiltInProxyConfig()) { error in
+            let issue = (error as? AppIssueError)?.issue
+            XCTAssertEqual(issue?.code, .missingMasterKey)
+        }
+    }
+
+    func testBuiltInProxyConfigUsesStoredUpstreamKeyWhenMasterKeyExistsAndAuthDisabled() throws {
+        try KeychainService.set("sk-test", forKey: .zaiAPIKey)
+        try KeychainService.set("local-secret", forKey: .litellmMasterKey)
         let vm = AppViewModel(defaults: defaults)
         vm.requireLocalAuth = false
 
         let config = try vm.buildBuiltInProxyConfig()
 
         XCTAssertEqual(config.upstreamAPIKey, "sk-test")
-        XCTAssertFalse(config.requiresAuth)
-        XCTAssertEqual(config.masterKey, "proxypilot-local-noauth")
+        XCTAssertTrue(config.requiresAuth)
+        XCTAssertEqual(config.masterKey, "local-secret")
+        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
+        XCTAssertTrue(config.denyRequestsWhenAllowlistEmpty)
     }
 
     func testBuiltInProxyConfigRequiresMasterKeyWhenLocalAuthEnabled() throws {
@@ -531,6 +564,27 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.runInBackground)
     }
 
+    func testDisablingMenuBarExtraWhileRunningInBackgroundKeepsItEnabled() {
+        let vm = AppViewModel(defaults: defaults)
+        vm.runInBackground = true
+        vm.showMenuBarExtra = false
+
+        XCTAssertTrue(vm.runInBackground)
+        XCTAssertTrue(vm.showMenuBarExtra)
+        XCTAssertEqual(defaults.object(forKey: AppViewModel.showMenuBarExtraDefaultsKey) as? Bool, true)
+    }
+
+    func testBackgroundModeRestoresMenuBarExtraDuringInitialization() {
+        defaults.set(true, forKey: "proxypilot.runInBackground")
+        defaults.set(false, forKey: AppViewModel.showMenuBarExtraDefaultsKey)
+
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.runInBackground)
+        XCTAssertTrue(vm.showMenuBarExtra)
+        XCTAssertEqual(defaults.object(forKey: AppViewModel.showMenuBarExtraDefaultsKey) as? Bool, true)
+    }
+
     func testToolbarStatusHidesPlainStoppedStateOnly() {
         let vm = AppViewModel(defaults: defaults)
 
@@ -735,6 +789,23 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(vm.visibleKeysProviders.contains(.qwen))
         XCTAssertTrue(vm.visibleKeysProviders.contains(.openAI))
         XCTAssertFalse(vm.visibleKeysProviders.contains(.zAI))
+        XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey))
+        XCTAssertTrue(defaults.stringArray(forKey: AppViewModel.visibleKeysProvidersDefaultsKey)?.contains(KeysProviderViewItem.qwen.rawValue) == true)
+    }
+
+    func testQwenVisibilityMigrationPersistsTheVisibleArrayBeforeItsMarker() {
+        defaults.set(
+            [KeysProviderViewItem.openAI.rawValue],
+            forKey: AppViewModel.visibleKeysProvidersDefaultsKey
+        )
+
+        let visible = AppViewModel.decodedVisibleKeysProviders(
+            from: defaults,
+            storedOrderRawValues: [KeysProviderViewItem.openAI.rawValue]
+        )
+
+        XCTAssertTrue(visible.contains(.qwen))
+        XCTAssertTrue(defaults.stringArray(forKey: AppViewModel.visibleKeysProvidersDefaultsKey)?.contains(KeysProviderViewItem.qwen.rawValue) == true)
         XCTAssertTrue(defaults.bool(forKey: AppViewModel.didMigrateQwenVisibleProviderDefaultsKey))
     }
 
@@ -1106,7 +1177,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.isStoppingCLIProxy)
     }
 
-    func testPreflightMasterKeyOptionalWhenUpstreamCredentialStoredAndBuiltInAuthDisabled() {
+    func testPreflightMasterKeyRequiredWhenUpstreamCredentialStoredAndBuiltInAuthDisabled() {
         let preflight = PreflightService()
         let context = PreflightContext(
             proxyURLString: "http://127.0.0.1:4000",
@@ -1122,8 +1193,8 @@ final class AppViewModelTests: XCTestCase {
         let results = preflight.run(context: context)
         let masterKeyCheck = results.first { $0.id == "master_key" }
 
-        XCTAssertEqual(masterKeyCheck?.status, .info)
-        XCTAssertEqual(masterKeyCheck?.fixAction, PreflightFixAction.none)
+        XCTAssertEqual(masterKeyCheck?.status, .fail)
+        XCTAssertEqual(masterKeyCheck?.fixAction, PreflightFixAction.openMasterKeyEditor)
     }
 
     func testPreflightLocalProviderDoesNotRequireAPIKey() {
@@ -1325,6 +1396,18 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(manager.isModelSelected("llama3:8b"))
         XCTAssertTrue(manager.isModelSelected("qwen2.5-coder:7b"))
         XCTAssertEqual(manager.selectedUpstreamModels, ["llama3:8b", "qwen2.5-coder:7b"])
+    }
+
+    func testGitHubCopilotDoesNotAutoSelectAllFetchedModels() {
+        let manager = makeProviderManager()
+        manager.upstreamProvider = .githubCopilot
+
+        manager.applyFetchedUpstreamModels([
+            UpstreamModel(id: "copilot-cloud-a", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+            UpstreamModel(id: "copilot-cloud-b", contextLength: nil, promptPricePer1M: nil, completionPricePer1M: nil),
+        ])
+
+        XCTAssertTrue(manager.selectedUpstreamModels.isEmpty)
     }
 
     func testCloudProviderDoesNotAutoSelectFetchedModels() {
@@ -1939,6 +2022,7 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testActivateCustomProviderBuildsConfigWithCustomEndpointAndKey() throws {
+        try KeychainService.set("local-secret", forKey: .litellmMasterKey)
         let vm = AppViewModel(defaults: defaults)
         vm.addCustomProvider(name: "Together", apiBaseURL: "https://api.together.xyz/v1", apiKey: "sk-custom")
         let provider = try XCTUnwrap(vm.customProviders.first)
@@ -2007,6 +2091,7 @@ final class AppViewModelTests: XCTestCase {
     }
 
     func testCustomProviderProxyConfigUsesObserveOnlyPromptCaching() throws {
+        try KeychainService.set("local-secret", forKey: .litellmMasterKey)
         let vm = AppViewModel(defaults: defaults)
         vm.promptCachingMode = .computeCacheHints
         vm.addCustomProvider(name: "Together", apiBaseURL: "https://api.together.xyz/v1", apiKey: "sk-custom")
@@ -2539,7 +2624,7 @@ final class AppViewModelTests: XCTestCase {
         )
     }
 
-    func testDoesNotImportOlderCLISessionWhenNewerGUISessionExists() throws {
+    func testDoesNotImportOlderCLISessionWhenNewerGUISessionExists() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -2576,18 +2661,21 @@ final class AppViewModelTests: XCTestCase {
             ),
             to: reportURL
         )
-
         let vm = AppViewModel(defaults: defaults, sessionReportURL: reportURL)
-        vm.importExternalSessionReportEvents()
+        let importTask = vm.importExternalSessionReportEvents()
+        // Pin the Task's existence: `await importTask?.value` is a silent no-op
+        // if the import ever returns nil early, which would re-vacate this test
+        // without failing it.
+        XCTAssertNotNil(importTask, "Import must return a Task for this test to observe the dedup guard")
+        await importTask?.value
 
         XCTAssertEqual(vm.sessionReportCard.totalRequests, 0)
-        XCTAssertEqual(vm.sessionReportCard.totalTokens, 0)
+        XCTAssertTrue(vm.sessionReportCard.requests.isEmpty)
     }
 
     func testHasKeyForProviderReturnsFalseWhenNoKeyStored() {
         let vm = AppViewModel(defaults: defaults)
-        let result = vm.hasKey(for: .openRouter)
-        XCTAssertTrue(result == true || result == false)
+        XCTAssertFalse(vm.hasKey(for: .openRouter))
     }
 
     func testPreflightMasterKeyRequiredWhenBuiltInAuthEnabled() {
@@ -2875,6 +2963,44 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(csv.contains("/v1/chat/completions"))
         XCTAssertTrue(csv.contains(",40,60,10,"))
         XCTAssertTrue(csv.contains("0.000300"))
+    }
+
+    func testSessionRequestsCSVNeutralizesFormulaLeadingCellsWithoutChangingOrdinaryCells() {
+        let vm = AppViewModel(defaults: defaults)
+        let dangerousValues = ["=SUM(1,2)", "+1+1", "-1+1", "@sum", "\tvalue", "\rvalue", "\nvalue"]
+
+        for value in dangerousValues {
+            vm.sessionReportCard.record(.init(
+                timestamp: Date(timeIntervalSince1970: 0),
+                model: value,
+                promptTokens: 0,
+                completionTokens: 0,
+                durationSeconds: 0,
+                path: "ordinary-path",
+                wasStreaming: false
+            ))
+        }
+        vm.sessionReportCard.record(.init(
+            timestamp: Date(timeIntervalSince1970: 0),
+            model: "ordinary-model",
+            promptTokens: 0,
+            completionTokens: 0,
+            durationSeconds: 0,
+            path: "ordinary-path",
+            wasStreaming: false
+        ))
+
+        let csv = vm.sessionRequestsCSV()
+
+        XCTAssertTrue(csv.contains("\"'=SUM(1,2)\""))
+        XCTAssertTrue(csv.contains("'+1+1"))
+        XCTAssertTrue(csv.contains("'-1+1"))
+        XCTAssertTrue(csv.contains("'@sum"))
+        XCTAssertTrue(csv.contains("'\tvalue"))
+        XCTAssertTrue(csv.contains("\"'\rvalue\""))
+        XCTAssertTrue(csv.contains("\"'\nvalue\""))
+        XCTAssertTrue(csv.contains("ordinary-model,ordinary-path"))
+        XCTAssertFalse(csv.contains("'ordinary-model"))
     }
 
     func testSessionRequestsCSVIsEmptyWhenNoRequestsExist() {

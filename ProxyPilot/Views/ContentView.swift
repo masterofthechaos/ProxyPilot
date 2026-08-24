@@ -2666,7 +2666,7 @@ private struct AnalyticsOptInView: View {
             Text("Please consider sharing basic, anonymous analytics.")
                 .font(.title3.bold())
 
-            Text("ProxyPilot uses anonymous analytics to spot crashes and confirm that updates work. By default, it only reports app opens and app version; opting in also includes successful proxy engagement and crash reporting. Prompts, endpoint IDs, and system info are never collected, and you can change this any time in Customization.")
+            Text("ProxyPilot uses anonymous analytics to spot crashes and confirm that updates work. By default, it only reports app opens and app version; opting in also includes successful proxy engagement and crash reporting. Prompts, endpoint IDs, and system info are never collected, and you can change this any time in Advanced settings.")
                 .foregroundStyle(.secondary)
 
             HStack {

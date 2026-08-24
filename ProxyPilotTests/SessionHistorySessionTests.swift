@@ -897,6 +897,76 @@ final class SessionHistorySessionTests: XCTestCase {
         XCTAssertTrue(lines[2].contains("\"/v1/chat, with comma\""), "Fields containing commas must be quoted")
     }
 
+    func testSessionHistoryFileExportCSVNeutralizesFormulaInjection() {
+        // `model` is attacker-influenced: it comes from the request body (or the
+        // upstream response), and an empty allowlist admits arbitrary strings.
+        // Without neutralization a crafted model name is a live formula the
+        // moment the exported CSV is opened in Excel/Numbers/Sheets.
+        let requests = [
+            ProxyPilotCore.RequestRecord(
+                timestamp: Date(timeIntervalSince1970: 100),
+                model: "=cmd|'/c calc'!A1",
+                promptTokens: 1,
+                completionTokens: 1,
+                promptCacheHitTokens: nil,
+                promptCacheMissTokens: nil,
+                promptCacheWriteTokens: nil,
+                durationSeconds: 0.5,
+                path: "/v1/messages",
+                wasStreaming: false
+            ),
+            ProxyPilotCore.RequestRecord(
+                timestamp: Date(timeIntervalSince1970: 200),
+                model: "+SUM(A1)",
+                promptTokens: 1,
+                completionTokens: 1,
+                promptCacheHitTokens: nil,
+                promptCacheMissTokens: nil,
+                promptCacheWriteTokens: nil,
+                durationSeconds: 0.5,
+                path: "/v1/messages",
+                wasStreaming: false
+            )
+        ]
+        let session = SessionHistorySession(id: "session-csv", source: "cli", requests: requests)
+
+        let lines = SessionHistoryFileExport.csv(for: session).components(separatedBy: "\r\n")
+
+        // No quoting is expected here: the neutralized value contains no comma,
+        // quote, or line break, so the apostrophe prefix alone makes it inert.
+        XCTAssertTrue(
+            lines[1].contains("'=cmd|'/c calc'!A1"),
+            "A leading = must be prefixed with an apostrophe so the cell is inert"
+        )
+        XCTAssertFalse(lines[1].contains(",=cmd"), "The raw formula must not survive unescaped")
+        XCTAssertTrue(lines[2].contains("'+SUM(A1)"), "A leading + must be neutralized too")
+        XCTAssertFalse(lines[2].contains(",+SUM"), "The raw formula must not survive unescaped")
+    }
+
+    func testSessionHistoryFileExportCSVQuotesCarriageReturns() {
+        // Records are joined with \r\n, so a bare \r inside a field would forge
+        // a row boundary unless the field is quoted.
+        let requests = [
+            ProxyPilotCore.RequestRecord(
+                timestamp: Date(timeIntervalSince1970: 100),
+                model: "glm-5\rinjected",
+                promptTokens: 1,
+                completionTokens: 1,
+                promptCacheHitTokens: nil,
+                promptCacheMissTokens: nil,
+                promptCacheWriteTokens: nil,
+                durationSeconds: 0.5,
+                path: "/v1/messages",
+                wasStreaming: false
+            )
+        ]
+        let session = SessionHistorySession(id: "session-csv", source: "cli", requests: requests)
+
+        let csv = SessionHistoryFileExport.csv(for: session)
+
+        XCTAssertTrue(csv.contains("\"glm-5\rinjected\""), "Fields containing \\r must be quoted")
+    }
+
     func testSessionHistoryFileExportJSONMatchesEncodedSessionShape() throws {
         let requests = [
             ProxyPilotCore.RequestRecord(

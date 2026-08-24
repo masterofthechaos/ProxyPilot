@@ -45,6 +45,18 @@ pp_install_path() {
   printf '/Applications/%s\n' "$(pp_app_wrapper_name "${1}")"
 }
 
+# Derived-data location for channel builds.
+#
+# Deliberately NOT under /tmp: the app built here is copied straight into
+# /Applications, so a world-writable parent directory would let any other local
+# account pre-create the path and stage the bundle that gets installed. This
+# lives under the user's own Library, which is not writable by other accounts.
+# Both build_release.sh and install_to_applications.sh must resolve the same
+# path, which is why it is defined once here.
+pp_derived_data_path() {
+  printf '%s/Library/Caches/ProxyPilot/Derived-%s\n' "${HOME}" "${1}"
+}
+
 pp_dmg_name() {
   local channel
   local version

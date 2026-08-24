@@ -300,6 +300,22 @@ proxypilot logs [--lines <n>] [--follow] [--json]
 
 ---
 
+### `sessions`
+
+Browse recorded proxy sessions and their per-request history.
+
+```
+proxypilot sessions list [--json]
+proxypilot sessions show <session-id> [--include-logs] [--json]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--include-logs` | false | Include captured prompt/output records (`sessions show` only; requires input/output logging to have been enabled) |
+| `--json` | false | Emit JSON output |
+
+---
+
 ### `update`
 
 First-class CLI update command. Downloads the latest binary and replaces the installed executable in-place.
@@ -338,11 +354,11 @@ proxypilot serve [--port <port>] [--provider <provider>] [--upstream-url <upstre
 | `--mcp` | false | Run as MCP server over stdio instead of HTTP proxy |
 | `--json` | false | Emit JSON output (ignored in MCP mode) |
 
-MCP mode exposes 13 tools:
+MCP mode exposes 15 tools:
 `preflight`, `auth_status`, `auth_set`, `verify_routing`,
-`proxy_start`, `proxy_stop`, `proxy_restart`, `proxy_status`,
+`proxy_start`, `proxy_stop`, `proxy_restart`, `proxy_route_set`, `proxy_status`,
 `xcode_config_install`, `xcode_config_remove`, `list_upstream_models`,
-`get_session_stats`, `proxy_logs`.
+`get_session_stats`, `get_session_history`, `proxy_logs`.
 
 ---
 

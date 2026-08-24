@@ -23,7 +23,9 @@ enum KeychainService {
     private static var service: String {
         ProcessInfo.processInfo.environment["PROXYPILOT_KEYCHAIN_SERVICE"] ?? "proxypilot"
     }
-    private static let legacyService = "litellm-zai"
+    private static var legacyService: String {
+        ProcessInfo.processInfo.environment["PROXYPILOT_LEGACY_KEYCHAIN_SERVICE"] ?? "litellm-zai"
+    }
 
     /// Migrates keys from the legacy "litellm-zai" service to "proxypilot".
     /// Safe to call multiple times — skips keys that already exist under the new service.

@@ -49,6 +49,14 @@ final class CustomProviderStorage: ObservableObject {
         KeychainService.exists(account: provider.keychainAccountName)
     }
 
+    func removeAll() {
+        for provider in providers {
+            try? KeychainService.delete(account: provider.keychainAccountName)
+        }
+        providers.removeAll()
+        defaults.removeObject(forKey: Self.defaultsKey)
+    }
+
     // MARK: - Persistence
 
     private func load() {

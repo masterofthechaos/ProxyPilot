@@ -29,6 +29,24 @@ assert_eq "$(pp_install_path alpha)" "/Applications/ProxyPilot-alpha.app"
 assert_eq "$(pp_dmg_name stable 1.11.1 124)" "ProxyPilot-v1.11.1.dmg"
 assert_eq "$(pp_dmg_name alpha 1.11.1 124)" "ProxyPilot-alpha-v1.11.1+124.dmg"
 
+assert_file_contains() {
+  local path="$1"
+  local expected="$2"
+
+  if ! grep -Fq -- "${expected}" "${path}"; then
+    echo "Assertion failed: expected '${path}' to contain '${expected}'" >&2
+    exit 1
+  fi
+}
+
+assert_file_contains "${ROOT_DIR}/project.yml" 'if [[ "$CONFIGURATION" != "Release" && "$CONFIGURATION" != "Release-Alpha" ]]; then'
+assert_file_contains "${ROOT_DIR}/project.yml" 'lipo -create "$ARM64_PRODUCTS/proxypilot" "$X86_64_PRODUCTS/proxypilot" -output "$HELPERS_DIR/proxypilot"'
+assert_file_contains "${ROOT_DIR}/project.yml" 'lipo -create "$ARM64_PRODUCTS/proxypilot-agent" "$X86_64_PRODUCTS/proxypilot-agent" -output "$HELPERS_DIR/proxypilot-agent"'
+assert_file_contains "${ROOT_DIR}/ProxyPilotCLI/tests/smoke_test.sh" 'if [[ "$(uname -s)" == "Darwin" ]]; then'
+assert_file_contains "${ROOT_DIR}/ProxyPilotCLI/tests/smoke_test.sh" 'agent status assertions skipped because Agent status is macOS-only'
+assert_file_contains "${ROOT_DIR}/scripts/build_signed_dmg.sh" 'Authenticated CLI metadata (paste into proxypilot-versions.json)'
+assert_file_contains "${ROOT_DIR}/scripts/build_signed_dmg.sh" 'ed_signature_cli:'
+
 if pp_require_release_channel beta >/dev/null 2>&1; then
   echo "Expected invalid release channel to fail" >&2
   exit 1

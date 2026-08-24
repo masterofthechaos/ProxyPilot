@@ -234,6 +234,23 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(state.lastUpstreamModelUsed, "anthropic/claude-opus-4.8:exacto")
     }
 
+    @MainActor
+    func testBeginTrackedRequestCompletesBeforeImmediateResolution() async {
+        let server = LocalProxyServer()
+        let requestID = UUID()
+
+        await server.beginTrackedRequest(
+            id: requestID,
+            modelName: "claude-transport",
+            clearsUpstreamModelAttribution: true
+        )
+        server.state.resolveRequest(id: requestID, modelName: "openai/gpt-5.6")
+
+        XCTAssertEqual(server.state.pendingRequestCount, 1)
+        XCTAssertEqual(server.state.activeModels, ["openai/gpt-5.6"])
+        XCTAssertEqual(server.state.lastUpstreamModelUsed, "openai/gpt-5.6")
+    }
+
     // MARK: - Helpers
 
     private typealias H = LocalProxyServerHelpers
@@ -371,6 +388,50 @@ final class LocalProxyServerTests: XCTestCase {
         let headers = H.parseHeaders(lines)
         XCTAssertEqual(headers.count, 1)
         XCTAssertEqual(headers["valid-header"], "value")
+    }
+
+    // MARK: - Content-Length validation
+
+    func testContentLengthOutcomeRejectsNegativeLength() {
+        // `Content-Length: -1` used to reach `prefix(-1)`, which traps — and it
+        // did so before the auth gate, so any local client could crash the proxy
+        // without credentials.
+        XCTAssertEqual(
+            H.contentLengthOutcome(header: "-1", alreadyReceived: 0, maxBodyBytes: 1_000),
+            .invalid
+        )
+        XCTAssertEqual(
+            H.contentLengthOutcome(header: "-9999999", alreadyReceived: 0, maxBodyBytes: 1_000),
+            .invalid
+        )
+    }
+
+    func testContentLengthOutcomeAcceptsValidAndAbsentLengths() {
+        XCTAssertEqual(
+            H.contentLengthOutcome(header: "42", alreadyReceived: 0, maxBodyBytes: 1_000),
+            .accept(42)
+        )
+        // Absent or unparseable keeps its historical "no body" meaning rather
+        // than becoming an error.
+        XCTAssertEqual(
+            H.contentLengthOutcome(header: nil, alreadyReceived: 0, maxBodyBytes: 1_000),
+            .accept(0)
+        )
+        XCTAssertEqual(
+            H.contentLengthOutcome(header: "not-a-number", alreadyReceived: 0, maxBodyBytes: 1_000),
+            .accept(0)
+        )
+    }
+
+    func testContentLengthOutcomeRejectsOversizedBodies() {
+        XCTAssertEqual(
+            H.contentLengthOutcome(header: "1001", alreadyReceived: 0, maxBodyBytes: 1_000),
+            .tooLarge
+        )
+        XCTAssertEqual(
+            H.contentLengthOutcome(header: "10", alreadyReceived: 1_001, maxBodyBytes: 1_000),
+            .tooLarge
+        )
     }
 
     func testParseHeadersLastWinsForDuplicates() {
@@ -1042,7 +1103,7 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertTrue(config.requiresUpstreamAPIKey)
     }
 
-    func testProtectedRoutesStayCompatibleWhenUpstreamCredentialIsPresentAndAuthDisabled() {
+    func testProtectedRoutesRequireAuthWhenUpstreamCredentialIsPresentAndAuthDisabled() {
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: 4000,
@@ -1058,7 +1119,7 @@ final class LocalProxyServerTests: XCTestCase {
             googleThoughtSignatureStore: nil
         )
 
-        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
+        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
     }
 
     func testProtectedRoutesRequireAuthWhenLocalAuthEnabled() {
@@ -1364,6 +1425,7 @@ final class LocalProxyServerTests: XCTestCase {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
         request.httpBody = jsonBody([
             "model": "claude-opus-4-7",
             "max_tokens": 64,
@@ -1439,6 +1501,7 @@ final class LocalProxyServerTests: XCTestCase {
         var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
         request.httpBody = jsonBody([
             "model": "claude-opus-4-7",
             "max_tokens": 64,
@@ -1461,6 +1524,114 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(record.promptCacheMissTokens, 8)
         XCTAssertEqual(record.path, "/v1/messages")
         XCTAssertTrue(record.wasStreaming)
+    }
+
+    func testSuccessfulEmptyAnthropicPassthroughStreamCompletesTrackingAndRecordsRequest() async throws {
+        let upstream = LocalHTTPStubServer(body: "", contentType: "text/event-stream")
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .deepSeek,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: "sk-test",
+            allowedModels: ["deepseek-v4-flash"],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "deepseek-v4-flash",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/messages")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer test", forHTTPHeaderField: "Authorization")
+        request.httpBody = jsonBody([
+            "model": "claude-opus-4-7",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let (record, pendingCount, failedCount) = try await MainActor.run {
+            (
+                try XCTUnwrap(server.reportCard.requests.last),
+                server.state.pendingRequestCount,
+                server.state.failedRequestCount
+            )
+        }
+        XCTAssertEqual(record.model, "deepseek-v4-flash")
+        XCTAssertEqual(record.promptTokens, 0)
+        XCTAssertEqual(record.completionTokens, 0)
+        XCTAssertTrue(record.wasStreaming)
+        XCTAssertEqual(pendingCount, 0)
+        XCTAssertEqual(failedCount, 0)
+    }
+
+    func testDirectOpenAIChatClearsPriorRemappedModelAttribution() async throws {
+        let upstream = LocalHTTPStubServer(body: """
+        {"id":"chatcmpl-direct","model":"gpt-5.6","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}
+        """)
+        let upstreamPort = try await upstream.start()
+        defer { upstream.stop() }
+
+        let port = try unusedLoopbackPort()
+        let server = LocalProxyServer()
+        let config = LocalProxyServer.Config(
+            host: "127.0.0.1",
+            port: port,
+            masterKey: "test",
+            upstreamProvider: .openAI,
+            upstreamAPIBase: URL(string: "http://127.0.0.1:\(upstreamPort)/v1")!,
+            upstreamAPIKey: nil,
+            allowedModels: [],
+            requiresAuth: false,
+            anthropicTranslatorMode: .hardened,
+            miniMaxRoutingMode: .standard,
+            preferredAnthropicUpstreamModel: "routed-model",
+            googleThoughtSignatureStore: nil
+        )
+
+        try server.start(config: config)
+        defer { try? server.stop() }
+        await waitForLocalProxyToRun(server)
+        await MainActor.run {
+            server.state.lastUpstreamModelUsed = "routed-model"
+        }
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = jsonBody([
+            "model": "gpt-5.6",
+            "messages": [["role": "user", "content": "hi"]]
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let didRecord = await waitForReportCard(server, requestCount: 1)
+        XCTAssertTrue(didRecord)
+
+        let (lastUpstreamModelUsed, lastModelSeen) = await MainActor.run {
+            (server.state.lastUpstreamModelUsed, server.state.lastModelSeen)
+        }
+        XCTAssertEqual(lastUpstreamModelUsed, "")
+        XCTAssertEqual(lastModelSeen, "gpt-5.6")
     }
 
     // MARK: - Static limitStatusCode (existing on LocalProxyServer)

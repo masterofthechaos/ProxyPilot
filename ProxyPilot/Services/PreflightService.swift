@@ -140,7 +140,7 @@ final class PreflightService {
             ))
         }
 
-        let masterKeyRequired = context.requireLocalAuth
+        let masterKeyRequired = context.requireLocalAuth || context.hasUpstreamKey
         if masterKeyRequired {
             if context.hasMasterKey {
                 results.append(.init(
@@ -163,7 +163,7 @@ final class PreflightService {
             results.append(.init(
                 id: "master_key",
                 title: String(localized: "Local Proxy Password"),
-                detail: String(localized: "Optional in built-in mode when local auth is disabled."),
+                detail: String(localized: "Optional in built-in mode when local auth is disabled and no upstream key is stored."),
                 status: .pass,
                 fixAction: .none
             ))
@@ -171,7 +171,7 @@ final class PreflightService {
             results.append(.init(
                 id: "master_key",
                 title: String(localized: "Local Proxy Password"),
-                detail: String(localized: "Optional in built-in mode when local auth is disabled. No action required."),
+                detail: String(localized: "Optional in built-in mode when local auth is disabled and no upstream key is stored. No action required."),
                 status: .info,
                 fixAction: .none
             ))

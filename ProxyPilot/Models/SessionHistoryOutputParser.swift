@@ -32,15 +32,20 @@ struct SessionHistoryParsedOutput: Equatable {
 }
 
 enum SessionHistoryOutputParser {
+    static let maximumInputCharacters = 1_048_576
+    static let maximumBlocks = 2_048
+
     static func parse(_ content: InputOutputLogContent) -> SessionHistoryParsedOutput {
         parse(content.sessionHistoryText)
     }
 
     static func parse(_ rawOutput: String) -> SessionHistoryParsedOutput {
-        let blocks = rawOutput
+        let wasTruncated = rawOutput.count > maximumInputCharacters
+        let blocks = String(rawOutput.prefix(maximumInputCharacters))
             .components(separatedBy: "\n\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+            .prefix(maximumBlocks)
 
         var assistantText = ""
         var toolCalls: [ToolAccumulator] = []
@@ -52,7 +57,7 @@ enum SessionHistoryOutputParser {
         // streaming index so we can append to the right accumulator instead
         // of producing one ghost row per chunk.
         var openAIDeltaIndexMap: [Int: Int] = [:]
-        var malformedData = false
+        var malformedData = wasTruncated
         var sawStructuredPayload = false
 
         for block in blocks {

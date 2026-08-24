@@ -11,14 +11,10 @@ struct RouteCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "route", abstract: "Manage the shared CLI-owned route.", subcommands: [RouteStatusCommand.self, RouteSetCommand.self, RouteEnsureCommand.self])
 }
 
-private struct RouteSelection: Codable { let provider: String; let model: String; let port: UInt16; let updatedAt: Date }
-private enum RouteState {
-    static var directory: URL { PidFile.pidFilePath.deletingLastPathComponent() }
-    static var selection: URL { directory.appendingPathComponent("route.json") }
-    static var lock: URL { directory.appendingPathComponent("route.lock") }
-    static func load() -> RouteSelection? { guard let data = try? Data(contentsOf: selection) else { return nil }; let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601; return try? d.decode(RouteSelection.self, from: data) }
-    static func save(_ value: RouteSelection) throws { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true); let e = JSONEncoder(); e.dateEncodingStrategy = .iso8601; try e.encode(value).write(to: selection, options: .atomic) }
-}
+// `RouteSelection` and the route.json/route.lock accessors live in
+// Support/RouteStateStore.swift so the MCP `proxy_route_set` tool writes through
+// the same store and lock as this command.
+private typealias RouteState = RouteStateStore
 
 private enum RouteReadiness {
     static func models(port: UInt16) async -> Set<String>? {
@@ -41,7 +37,19 @@ struct RouteStatusCommand: AsyncParsableCommand {
     func run() async throws {
         let selected = RouteState.load(); let selectedPort = selected?.port ?? 4000; let probe = await CLIProxyRuntime.probeProxy(on: selectedPort); let pid = PidFile.read()
         let applied = if let selected { await RouteReadiness.selected(port: selected.port, model: selected.model) } else { false }
-        let payload: [String: Any] = ["selected": selected != nil, "applied": applied, "reachable": probe.reachable, "owner": pid == nil ? "none" : "cli", "provider": selected?.provider ?? NSNull(), "model": selected?.model ?? NSNull(), "port": Int(selectedPort), "verification_state": applied ? "models_ready" : (probe.reachable ? "mismatched" : "stopped")]
+        let verificationState = applied ? "models_ready" : (probe.reachable ? "mismatched" : "stopped")
+        guard json else {
+            if let selected {
+                print("Route:   \(selected.provider) / \(selected.model) (port \(selected.port))")
+            } else {
+                print("Route:   none selected (port \(selectedPort))")
+            }
+            print("Applied: \(applied ? "yes" : "no")")
+            print("Proxy:   \(probe.reachable ? "reachable" : "not reachable"), owner \(pid == nil ? "none" : "cli")")
+            print("State:   \(verificationState)")
+            return
+        }
+        let payload: [String: Any] = ["selected": selected != nil, "applied": applied, "reachable": probe.reachable, "owner": pid == nil ? "none" : "cli", "provider": selected?.provider ?? NSNull(), "model": selected?.model ?? NSNull(), "port": Int(selectedPort), "verification_state": verificationState]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]); print(String(decoding: data, as: UTF8.self))
     }
 }
@@ -69,7 +77,7 @@ struct RouteSetCommand: AsyncParsableCommand {
         else if (await CLIProxyRuntime.probeProxy(on: port)).reachable { throw ValidationError("Port \(port) is owned by the GUI or an unmanaged listener; refusing to stop it") }
         do { try await start(provider: provider, model: model, port: port); try RouteState.save(.init(provider: provider, model: model, port: port, updatedAt: Date())) }
         catch { if let previous { try? await start(provider: previous.provider, model: previous.model, port: previous.port) }; throw error }
-        try await RouteStatusCommand(json: true).run()
+        try await RouteStatusCommand(json: json).run()
     }
     private func start(provider: String, model: String, port: UInt16) async throws {
         let process = Process(); process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]); process.arguments = ["start", "--provider", provider, "--model", model, "--port", String(port), "--daemon", "--json"]
@@ -89,6 +97,10 @@ struct RouteEnsureCommand: AsyncParsableCommand {
             process.standardOutput = FileHandle.standardOutput; process.standardError = FileHandle.standardError
             try process.run(); process.waitUntilExit(); guard process.terminationStatus == 0 else { throw ExitCode.failure }
         } else {
+            // Deliberately unconditional JSON: `rgps` invokes `route ensure`
+            // directly and predates the --json flag being honored, so switching
+            // this to human output on a bare invocation would break it. Revisit
+            // once the RepoGPS side is known to pass --json.
             try await RouteStatusCommand(json: true).run()
         }
     }

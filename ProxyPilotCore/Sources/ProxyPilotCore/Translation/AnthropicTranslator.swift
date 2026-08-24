@@ -406,6 +406,28 @@ public enum AnthropicTranslator {
 
     // MARK: - OpenAI-Compatible Normalization
 
+    /// Per-stream state for OpenAI-compatible SSE normalization.
+    ///
+    /// Some MiniMax streams omit the OpenAI chunk `id`. Keep any replacement
+    /// ID in the stream's owning forwarder so every id-less chunk receives the
+    /// same value without leaking it across concurrent requests.
+    public struct OpenAICompatibleStreamingNormalizationContext: Sendable {
+        private var stableStreamID: String?
+
+        public init() {}
+
+        fileprivate mutating func canonicalStreamID(providerID: String?) -> String {
+            if let stableStreamID {
+                return stableStreamID
+            }
+
+            let id = providerID.flatMap { $0.isEmpty ? nil : $0 }
+                ?? "chatcmpl-minimax-\(UUID().uuidString.lowercased())"
+            stableStreamID = id
+            return id
+        }
+    }
+
     /// Normalizes provider-specific buffered chat responses back into an
     /// OpenAI-compatible envelope before forwarding to strict clients.
     public static func normalizeOpenAICompatibleResponse(
@@ -444,12 +466,13 @@ public enum AnthropicTranslator {
 
     /// Normalizes a single SSE `data:` line for strict OpenAI-compatible
     /// clients. Non-JSON or non-data lines are passed through unchanged.
-    /// Unlike the buffered normalizer, this does NOT synthesize missing ids —
-    /// streaming chunks must share a consistent id across the stream, which the
-    /// per-line normalizer cannot guarantee.
+    /// The first usable ID becomes canonical for the supplied stream context.
+    /// If the provider omits it initially, a synthesized ID is retained even
+    /// when a conflicting provider ID appears later.
     public static func normalizeOpenAICompatibleStreamingLine(
         _ line: String,
-        provider: UpstreamProvider
+        provider: UpstreamProvider,
+        context: inout OpenAICompatibleStreamingNormalizationContext
     ) -> String {
         guard provider.isMiniMax,
               line.hasPrefix("data: "),
@@ -479,8 +502,12 @@ public enum AnthropicTranslator {
             return line
         }
 
-        // Sanitize without id synthesis.
+        // Sanitize and force one canonical ID across the entire stream. Strict
+        // clients can otherwise split one completion when a provider begins
+        // without an ID and introduces a different one in a later chunk.
         sanitizeMiniMaxResponseRoot(&root)
+        let providerID = (root["id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        root["id"] = context.canonicalStreamID(providerID: providerID)
 
         guard let normalizedData = try? JSONSerialization.data(withJSONObject: root),
               let normalizedString = String(data: normalizedData, encoding: .utf8) else {
@@ -654,16 +681,19 @@ public enum AnthropicTranslator {
     }
 
     private static func intValue(from value: Any?) -> Int? {
+        let parsed: Int?
         switch value {
         case let int as Int:
-            return int
+            parsed = int
         case let number as NSNumber:
-            return number.intValue
+            parsed = number.intValue
         case let string as String:
-            return Int(string)
+            parsed = Int(string)
         default:
             return nil
         }
+        guard let parsed, (0...1_000_000_000_000).contains(parsed) else { return nil }
+        return parsed
     }
 
     private static func nonEmptyString(_ value: Any?) -> String? {

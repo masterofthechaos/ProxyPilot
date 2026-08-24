@@ -49,33 +49,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let viewModel, viewModel.shouldPromptBeforeQuit() else {
-            return .terminateNow
-        }
+        guard let viewModel else { return .terminateNow }
 
-        let alert = NSAlert()
-        alert.messageText = String(localized: "Xcode Agent Config Is Still Installed")
-        alert.informativeText = String(localized: "Xcode's Claude Agent is routed through ProxyPilot. If you quit without removing, Xcode Agent won't work until you revert manually or reopen ProxyPilot.")
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: String(localized: "Remove & Quit"))
-        alert.addButton(withTitle: String(localized: "Keep & Quit"))
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            Task { @MainActor in
+        if viewModel.shouldPromptBeforeQuit() {
+            let alert = NSAlert()
+            alert.messageText = String(localized: "Xcode Agent Config Is Still Installed")
+            alert.informativeText = String(localized: "Xcode's Claude Agent is routed through ProxyPilot. If you quit without removing, Xcode Agent won't work until you revert manually or reopen ProxyPilot.")
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: String(localized: "Remove & Quit"))
+            alert.addButton(withTitle: String(localized: "Keep & Quit"))
+            if alert.runModal() == .alertFirstButtonReturn {
                 viewModel.removeXcodeAgentConfig()
             }
         }
-        return .terminateNow
+
+        Task { @MainActor in
+            await viewModel.stopProxy()
+            viewModel.applicationWillTerminate()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         dockTileController.restoreDefaultIcon()
-        guard let viewModel else { return }
-        Task { @MainActor in
-            await viewModel.stopProxy()
-        }
-        viewModel.applicationWillTerminate()
     }
 }
 

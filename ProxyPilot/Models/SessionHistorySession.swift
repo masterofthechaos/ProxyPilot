@@ -421,10 +421,19 @@ enum SessionHistoryFileExport {
     }
 
     private static func csvEscapedField(_ field: String) -> String {
-        guard field.contains(",") || field.contains("\"") || field.contains("\n") else {
-            return field
+        let formulaSafeValue: String
+        switch field.unicodeScalars.first {
+        case "=", "+", "-", "@", "\t", "\r", "\n":
+            formulaSafeValue = "'" + field
+        default:
+            formulaSafeValue = field
         }
-        return "\"" + field.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+
+        if formulaSafeValue.contains(",") || formulaSafeValue.contains("\"") || formulaSafeValue.contains("\n") || formulaSafeValue.contains("\r") {
+            let escaped = formulaSafeValue.replacingOccurrences(of: "\"", with: "\"\"")
+            return "\"\(escaped)\""
+        }
+        return formulaSafeValue
     }
 }
 

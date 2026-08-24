@@ -76,6 +76,12 @@ struct MCPToolPayloadTests {
         #expect(action.destructive)
     }
 
+    @Test func ioSessionLogConsentIsDisabledByDefault() {
+        #expect(MCPIOSessionLogConsent.environmentAllowsReads == false)
+        #expect(MCPIOSessionLogConsent.environmentVariable == "PROXYPILOT_MCP_ALLOW_IO_LOGS")
+        #expect(MCPIOSessionLogConsent.argumentName == "allow_io_log_read")
+    }
+
     @Test func statusProbeUsesRequestedPortWhenNoManagedPortExists() {
         let port = MCPStatusPortResolver.probePort(currentPort: nil, requestedPort: 4024)
 

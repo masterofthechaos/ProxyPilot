@@ -204,7 +204,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         if let requestedModel = anthropicRequest["model"] as? String,
-           !ActiveModelAlias.accepts(requestedModel, allowedModels: config.allowedModels) {
+           !ActiveModelAlias.accepts(
+               requestedModel,
+               allowedModels: config.allowedModels,
+               activeModel: config.preferredAnthropicUpstreamModel
+           ) {
             sendErrorResponse(context: context, status: .badRequest, message: "Model not allowed")
             return
         }
@@ -859,7 +863,11 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         let isStreaming = HTTPRequestParser.isStreamingRequest(body: bodyData)
         let parsedRequestModel = HTTPRequestParser.extractModel(from: bodyData)
         if let parsedRequestModel,
-           !ActiveModelAlias.accepts(parsedRequestModel, allowedModels: config.allowedModels) {
+           !ActiveModelAlias.accepts(
+               parsedRequestModel,
+               allowedModels: config.allowedModels,
+               activeModel: config.preferredAnthropicUpstreamModel
+           ) {
             sendErrorResponse(context: context, status: .badRequest, message: "Model not allowed")
             return
         }
@@ -1002,6 +1010,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             var lastSeenPromptCacheWriteTokens: Int?
             var lastSeenModel = requestModel ?? config.preferredAnthropicUpstreamModel
             var outputCapture = StreamedOutputCapture(captureEnabled: config.inputOutputLogger != nil)
+            var streamingNormalizationContext = AnthropicTranslator.OpenAICompatibleStreamingNormalizationContext()
 
             do {
                 let stream = UpstreamClient.forwardStreaming(
@@ -1025,7 +1034,8 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                     let normalizedLine = AnthropicTranslator.normalizeOpenAICompatibleStreamingLine(
                         rawLine,
-                        provider: config.upstreamProvider
+                        provider: config.upstreamProvider,
+                        context: &streamingNormalizationContext
                     )
                     let chunkData = SSEFraming.terminatedData(normalizedLine)
                     outputCapture.append(chunkData)
@@ -1159,6 +1169,7 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         var headers = HTTPHeaders()
         headers.add(name: "Content-Type", value: "application/json")
         headers.add(name: "Content-Length", value: "\(json.utf8.count)")
+        headers.add(name: "X-ProxyPilot-Server", value: "1")
 
         let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
         context.write(wrapOutboundOut(.head(head)), promise: nil)
@@ -1390,11 +1401,6 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     private func truncatedUpstreamErrorDetail(_ detail: String) -> String {
-        let cleaned = detail
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard cleaned.count > 600 else { return cleaned }
-        return String(cleaned.prefix(600)) + "..."
+        SensitiveTextSanitizer.sanitize(detail, maxCharacters: 600)
     }
 }
