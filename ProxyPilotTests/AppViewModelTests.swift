@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 import ProxyPilotCore
 @testable import ProxyPilot
 
@@ -302,18 +303,20 @@ final class AppViewModelTests: XCTestCase {
         }
     }
 
-    func testBuiltInProxyConfigRequiresMasterKeyForStoredUpstreamKeyWhenAuthDisabled() throws {
+    func testBuiltInProxyConfigDoesNotRequireMasterKeyForStoredUpstreamKeyWhenAuthDisabled() throws {
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
         let vm = AppViewModel(defaults: defaults)
         vm.requireLocalAuth = false
 
-        XCTAssertThrowsError(try vm.buildBuiltInProxyConfig()) { error in
-            let issue = (error as? AppIssueError)?.issue
-            XCTAssertEqual(issue?.code, .missingMasterKey)
-        }
+        let config = try vm.buildBuiltInProxyConfig()
+
+        XCTAssertEqual(config.upstreamAPIKey, "sk-test")
+        XCTAssertFalse(config.requiresAuth)
+        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
+        XCTAssertEqual(config.masterKey, "proxypilot-local-noauth")
     }
 
-    func testBuiltInProxyConfigUsesStoredUpstreamKeyWhenMasterKeyExistsAndAuthDisabled() throws {
+    func testBuiltInProxyConfigKeepsAuthDisabledWhenUnusedMasterKeyExists() throws {
         try KeychainService.set("sk-test", forKey: .zaiAPIKey)
         try KeychainService.set("local-secret", forKey: .litellmMasterKey)
         let vm = AppViewModel(defaults: defaults)
@@ -322,9 +325,9 @@ final class AppViewModelTests: XCTestCase {
         let config = try vm.buildBuiltInProxyConfig()
 
         XCTAssertEqual(config.upstreamAPIKey, "sk-test")
-        XCTAssertTrue(config.requiresAuth)
-        XCTAssertEqual(config.masterKey, "local-secret")
-        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
+        XCTAssertFalse(config.requiresAuth)
+        XCTAssertEqual(config.masterKey, "proxypilot-local-noauth")
+        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
         XCTAssertTrue(config.denyRequestsWhenAllowlistEmpty)
     }
 
@@ -596,6 +599,17 @@ final class AppViewModelTests: XCTestCase {
 
         vm.statusText = AppViewModel.statusText(for: .portOccupied(statusCode: 401))
         XCTAssertTrue(vm.shouldShowToolbarStatus)
+    }
+
+    func testRepoGPSRoutingRemainsNavigableBeforeManagedInstallation() {
+        let vm = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(vm.repoGPSRoutingFeatureEnabled)
+        XCTAssertTrue(
+            SettingsSection.availableSidebarSections(
+                repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
+            ).contains(.routing)
+        )
     }
 
     func testCustomizationPreferencesPersistAcrossRelaunch() {
@@ -1141,6 +1155,48 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(AppViewModel.statusText(for: .portOccupied(statusCode: 418)), "Port occupied by another service (HTTP 418)")
     }
 
+    func testToolbarProxyStatusDistinguishesGUICLIAndRepoGPSOwnership() {
+        XCTAssertEqual(
+            AppViewModel.toolbarProxyStatus(for: .runningInApp, repoGPSActive: false),
+            .init(kind: .gui, compactText: "GUI", fullText: "Running (GUI)")
+        )
+        XCTAssertEqual(
+            AppViewModel.toolbarProxyStatus(for: .runningExternal, repoGPSActive: false),
+            .init(kind: .cli, compactText: "CLI", fullText: "Running (CLI)")
+        )
+        XCTAssertEqual(
+            AppViewModel.toolbarProxyStatus(for: .runningExternal, repoGPSActive: true),
+            .init(kind: .repoGPS, compactText: "RepoGPS", fullText: "RepoGPS in flight")
+        )
+        XCTAssertEqual(
+            AppViewModel.toolbarProxyStatus(
+                for: .runningExternal,
+                repoGPSActive: false,
+                repoGPSLeasePresent: true
+            ),
+            .init(kind: .repoGPS, compactText: "RepoGPS", fullText: "RepoGPS route ready")
+        )
+    }
+
+    func testToolbarProxyStatusCoversStoppedAndConflictStates() {
+        XCTAssertEqual(
+            AppViewModel.toolbarProxyStatus(for: .stopped, repoGPSActive: false),
+            .init(kind: .stopped, compactText: "Stopped", fullText: "Stopped")
+        )
+        XCTAssertEqual(
+            AppViewModel.toolbarProxyStatus(for: .portOccupied(statusCode: 418), repoGPSActive: false),
+            .init(kind: .issue, compactText: "Conflict", fullText: "Port occupied by another service (HTTP 418)")
+        )
+    }
+
+    func testExternalCLIProxyScopesXcodeRouteAsInactive() {
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.applyProxyRuntimeStatus(.runningExternal)
+
+        XCTAssertEqual(vm.xcodeAgentAppliedModelText, "Inactive — external CLI owns the proxy")
+    }
+
     func testExternalCLIProxyCanBeStoppedFromGUI() {
         XCTAssertTrue(AppViewModel.canStopProxy(for: .runningExternal))
         XCTAssertTrue(AppViewModel.canStopProxy(for: .runningInApp))
@@ -1177,7 +1233,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertFalse(vm.isStoppingCLIProxy)
     }
 
-    func testPreflightMasterKeyRequiredWhenUpstreamCredentialStoredAndBuiltInAuthDisabled() {
+    func testPreflightMasterKeyOptionalWhenUpstreamCredentialStoredAndBuiltInAuthDisabled() {
         let preflight = PreflightService()
         let context = PreflightContext(
             proxyURLString: "http://127.0.0.1:4000",
@@ -1193,8 +1249,12 @@ final class AppViewModelTests: XCTestCase {
         let results = preflight.run(context: context)
         let masterKeyCheck = results.first { $0.id == "master_key" }
 
-        XCTAssertEqual(masterKeyCheck?.status, .fail)
-        XCTAssertEqual(masterKeyCheck?.fixAction, PreflightFixAction.openMasterKeyEditor)
+        XCTAssertEqual(masterKeyCheck?.status, .info)
+        XCTAssertEqual(masterKeyCheck?.fixAction, PreflightFixAction.none)
+        XCTAssertEqual(
+            masterKeyCheck?.detail,
+            "Optional in built-in mode when local auth is disabled. No action required."
+        )
     }
 
     func testPreflightLocalProviderDoesNotRequireAPIKey() {
@@ -3161,6 +3221,170 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(text.contains("Issue code: E003"))
     }
 
+    func testAnalyticsPayloadAllowlistRejectsSensitiveAndModelFields() {
+        let payload = TelemetryService.sanitizedPayload([
+            "provider_identifier": "openrouter",
+            "client_surface": "repogps",
+            "status_class": "5xx",
+            "prompt": "secret prompt",
+            "output": "secret output",
+            "model": "vendor/private-model-slug",
+            "model_slug": "vendor/private-model-slug",
+            "url": "https://private.example/path",
+            "raw_error": "credential leaked"
+        ], for: "proxy_request_failed")
+
+        XCTAssertEqual(payload["provider_identifier"], "openrouter")
+        XCTAssertEqual(payload["client_surface"], "repogps")
+        XCTAssertEqual(payload["status_class"], "5xx")
+        XCTAssertNil(payload["prompt"])
+        XCTAssertNil(payload["output"])
+        XCTAssertNil(payload["model"])
+        XCTAssertNil(payload["model_slug"])
+        XCTAssertNil(payload["url"])
+        XCTAssertNil(payload["raw_error"])
+    }
+
+    func testSessionSummaryIncludesProviderButNeverSpecificModelSlug() throws {
+        let forbiddenModel = "vendor/private-model-slug"
+        let sessionID = UUID().uuidString
+        let records = [
+            RequestRecord(
+                timestamp: Date(timeIntervalSince1970: 100),
+                model: forbiddenModel,
+                promptTokens: 1_200,
+                completionTokens: 300,
+                promptCacheHitTokens: 800,
+                promptCacheMissTokens: 200,
+                promptCacheWriteTokens: 100,
+                durationSeconds: 1.4,
+                path: "/v1/messages",
+                wasStreaming: true,
+                providerIdentifier: "openrouter",
+                promptCachingMode: "computeCacheHints",
+                contextCompactionEnabled: true,
+                translationMode: "hardened"
+            ),
+            RequestRecord(
+                timestamp: Date(timeIntervalSince1970: 104),
+                model: forbiddenModel,
+                promptTokens: 50,
+                completionTokens: 25,
+                durationSeconds: 4.2,
+                path: "/v1/chat/completions",
+                wasStreaming: false,
+                providerIdentifier: "openrouter",
+                promptCachingMode: "computeCacheHints",
+                contextCompactionEnabled: true,
+                translationMode: "hardened"
+            )
+        ]
+        let events = records.map { SessionReportEvent(source: "repogps", sessionID: sessionID, record: $0) }
+
+        let payload = try XCTUnwrap(TelemetryService.sessionSummaryPayloads(from: events).first)
+        XCTAssertEqual(payload["provider_identifiers"], "openrouter")
+        XCTAssertEqual(payload["client_surface"], "repogps")
+        XCTAssertEqual(payload["request_count"], "2")
+        XCTAssertEqual(payload["path_categories"], "anthropic_messages,chat_completions")
+        XCTAssertFalse(payload.keys.contains { $0.localizedCaseInsensitiveContains("model") })
+        XCTAssertFalse(payload.values.contains(forbiddenModel))
+    }
+
+    func testSessionSummaryNormalizesUnrecognizedProviderIdentifiers() throws {
+        let forbiddenValue = "vendor/private-model-slug"
+        let event = SessionReportEvent(source: "gui", sessionID: UUID().uuidString, record: RequestRecord(
+            model: "another-private-model",
+            promptTokens: 1,
+            completionTokens: 1,
+            durationSeconds: 1,
+            path: "/v1/messages",
+            wasStreaming: false,
+            providerIdentifier: forbiddenValue
+        ))
+
+        let payload = try XCTUnwrap(TelemetryService.sessionSummaryPayloads(from: [event]).first)
+        XCTAssertEqual(payload["provider_identifiers"], "other")
+        XCTAssertFalse(payload.values.contains(forbiddenValue))
+    }
+
+    func testSessionAnalyticsAreProspectiveDeduplicatedAndOptInOnly() {
+        var captured: [(String, [String: String])] = []
+        let telemetry = TelemetryService(
+            defaults: defaults,
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            postHogDeliveryEnabled: false,
+            protectedInternalMarkerURL: nil,
+            remoteCaptureHook: { captured.append(($0, $1)) }
+        )
+        let sessionID = UUID().uuidString
+        func event(_ timestamp: TimeInterval) -> SessionReportEvent {
+            SessionReportEvent(source: "cli", sessionID: sessionID, record: RequestRecord(
+                timestamp: Date(timeIntervalSince1970: timestamp),
+                model: "must-never-leave-device",
+                promptTokens: 10,
+                completionTokens: 5,
+                durationSeconds: 1,
+                path: "/v1/chat/completions",
+                wasStreaming: false,
+                providerIdentifier: "qwen"
+            ))
+        }
+        let historical = event(100)
+        let future = event(200)
+
+        telemetry.trackSessionReportEvents([historical], telemetryOptIn: false)
+        XCTAssertTrue(captured.isEmpty)
+
+        telemetry.trackSessionReportEvents([historical], telemetryOptIn: true)
+        XCTAssertTrue(captured.isEmpty, "First opted-in observation establishes a prospective baseline")
+
+        telemetry.trackSessionReportEvents([historical, future], telemetryOptIn: true)
+        XCTAssertEqual(captured.map(\.0), ["first_proxied_inference_succeeded", "proxy_session_summary"])
+        XCTAssertEqual(captured[0].1["provider_identifier"], "qwen")
+        XCTAssertEqual(captured[1].1["provider_identifiers"], "qwen")
+
+        telemetry.trackSessionReportEvents([historical, future], telemetryOptIn: true)
+        XCTAssertEqual(captured.count, 2, "Already summarized events must not be resent")
+    }
+
+    func testFreshInstallOptionalAnalyticsStillDefaultsOff() {
+        XCTAssertNil(defaults.object(forKey: "proxypilot.telemetryOptIn"))
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertFalse(vm.telemetryOptIn)
+    }
+
+    func testTelemetryDisclosureMatchesExpandedContract() {
+        let vm = AppViewModel(defaults: defaults)
+        let disclosure = vm.alwaysOnTelemetryDisclosureText
+        if !AppBuildBadge.isAlphaBundle(Bundle.main.bundleIdentifier) {
+            XCTAssertTrue(disclosure.contains("provider usage"))
+            XCTAssertTrue(disclosure.contains("specific model names are never sent"))
+            XCTAssertTrue(disclosure.contains("Prompts, completions"))
+        }
+    }
+
+    func testFeatureModeTelemetryFiresOnlyForPostInitializationChanges() {
+        var captured: [(String, [String: String])] = []
+        let telemetry = TelemetryService(
+            defaults: defaults,
+            baseDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+            postHogDeliveryEnabled: false,
+            protectedInternalMarkerURL: nil,
+            remoteCaptureHook: { captured.append(($0, $1)) }
+        )
+        let vm = AppViewModel(defaults: defaults, telemetryService: telemetry)
+        vm.telemetryOptIn = true
+        captured.removeAll()
+
+        vm.promptCachingMode = .observeOnly
+        vm.anthropicTranslatorFallbackEnabled = true
+
+        let featureEvents = captured.filter { $0.0 == "feature_used" }.map(\.1)
+        XCTAssertEqual(featureEvents.count, 2)
+        XCTAssertTrue(featureEvents.contains { $0["feature"] == "prompt_caching" && $0["mode"] == "observeOnly" })
+        XCTAssertTrue(featureEvents.contains { $0["feature"] == "anthropic_translation" && $0["mode"] == "legacy_fallback" })
+    }
+
     private func makeProviderManager() -> ProviderManager {
         ProviderManager(defaults: defaults, proxyService: ProxyService())
     }
@@ -3185,5 +3409,229 @@ final class AppViewModelTests: XCTestCase {
             fileExists: fileExists,
             workspaceOpener: { _ in }
         )
+    }
+
+    // MARK: - Coding Harness Tour
+
+    private var harnessPresentedKey: String { "proxypilot.harnessOnboarding.presentedVersion" }
+    private var harnessCompletedKey: String { "proxypilot.harnessOnboarding.completedVersion" }
+    private var bundleVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+    }
+
+    /// Guards the launch sheet chain: macOS silently drops a sheet when two are
+    /// presented from the same view, so at most one flag may ever be true.
+    private func assertAtMostOneSheetPresented(
+        _ vm: AppViewModel,
+        line: UInt = #line
+    ) {
+        let presented = [
+            vm.showOnboardingWizard,
+            vm.showKeychainAccessPrimer,
+            vm.showAnalyticsPrompt,
+            vm.showHarnessOnboarding
+        ].filter { $0 }.count
+        XCTAssertLessThanOrEqual(presented, 1, "More than one launch sheet presented", line: line)
+    }
+
+    func testHarnessOnboardingShowsOnceOnFirstOpen() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        defaults.set(bundleVersion, forKey: "proxypilot.analyticsPromptShownVersion")
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.maybeShowHarnessOnboarding()
+
+        XCTAssertTrue(vm.showHarnessOnboarding)
+        XCTAssertEqual(defaults.string(forKey: harnessPresentedKey), bundleVersion)
+        assertAtMostOneSheetPresented(vm)
+    }
+
+    func testHarnessOnboardingDoesNotAutoShowASecondTime() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        defaults.set(bundleVersion, forKey: harnessPresentedKey)
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.maybeShowHarnessOnboarding()
+
+        XCTAssertFalse(vm.showHarnessOnboarding)
+    }
+
+    /// Presence-gated, not version-equality-gated: a later release must not re-present it.
+    func testHarnessOnboardingDoesNotReappearOnALaterVersion() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        defaults.set("0.0.1-ancient", forKey: harnessPresentedKey)
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.maybeShowHarnessOnboarding()
+
+        XCTAssertFalse(vm.showHarnessOnboarding)
+    }
+
+    func testHarnessOnboardingSkipKeepsBadgeVisible() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        let vm = AppViewModel(defaults: defaults)
+        vm.maybeShowHarnessOnboarding()
+
+        vm.finishHarnessOnboarding(completed: false)
+
+        XCTAssertFalse(vm.showHarnessOnboarding)
+        XCTAssertTrue(vm.harnessOnboardingBadgeVisible)
+        XCTAssertNil(defaults.string(forKey: harnessCompletedKey))
+    }
+
+    func testHarnessOnboardingCompletionClearsBadge() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        let vm = AppViewModel(defaults: defaults)
+        vm.maybeShowHarnessOnboarding()
+
+        vm.finishHarnessOnboarding(completed: true)
+
+        XCTAssertFalse(vm.showHarnessOnboarding)
+        XCTAssertFalse(vm.harnessOnboardingBadgeVisible)
+        XCTAssertEqual(defaults.string(forKey: harnessCompletedKey), bundleVersion)
+    }
+
+    func testHarnessBadgeStaysHiddenAfterRelaunchOnceCompleted() {
+        defaults.set(bundleVersion, forKey: harnessCompletedKey)
+
+        let relaunched = AppViewModel(defaults: defaults)
+
+        XCTAssertFalse(relaunched.harnessOnboardingBadgeVisible)
+    }
+
+    func testHarnessBadgeVisibleUntilCompletedAcrossRelaunch() {
+        defaults.set(bundleVersion, forKey: harnessPresentedKey)
+
+        let relaunched = AppViewModel(defaults: defaults)
+
+        XCTAssertTrue(relaunched.harnessOnboardingBadgeVisible)
+    }
+
+    /// Manual re-entry is always available, even after the tour was completed.
+    func testOpenHarnessOnboardingIgnoresPersistedKeys() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        defaults.set(bundleVersion, forKey: harnessPresentedKey)
+        defaults.set(bundleVersion, forKey: harnessCompletedKey)
+        let vm = AppViewModel(defaults: defaults)
+
+        vm.openHarnessOnboarding(surface: "harnesses_tab")
+
+        XCTAssertTrue(vm.showHarnessOnboarding)
+    }
+
+    func testHarnessOnboardingSuppressedDuringWelcomeWizard() {
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertTrue(vm.showOnboardingWizard)
+
+        vm.maybeShowHarnessOnboarding()
+
+        XCTAssertFalse(vm.showHarnessOnboarding)
+        XCTAssertNil(defaults.string(forKey: harnessPresentedKey))
+        assertAtMostOneSheetPresented(vm)
+    }
+
+    func testHarnessOnboardingSuppressedWhileAnalyticsPromptIsUp() throws {
+        try XCTSkipUnless(analyticsPromptAvailableInTestHost)
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        let vm = AppViewModel(defaults: defaults)
+        vm.maybeShowAnalyticsPrompt()
+        XCTAssertTrue(vm.showAnalyticsPrompt)
+
+        vm.maybeShowHarnessOnboarding()
+
+        XCTAssertFalse(vm.showHarnessOnboarding)
+        assertAtMostOneSheetPresented(vm)
+    }
+
+    /// Micah's ordering requirement: the tour follows the analytics decision, so an
+    /// opted-in user has the tour itself attributed.
+    func testHarnessOnboardingFollowsAnalyticsPromptDismissal() throws {
+        try XCTSkipUnless(analyticsPromptAvailableInTestHost)
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        let vm = AppViewModel(defaults: defaults)
+        vm.maybeShowAnalyticsPrompt()
+        vm.maybeShowHarnessOnboarding()
+        XCTAssertFalse(vm.showHarnessOnboarding)
+
+        vm.dismissAnalyticsPrompt(optIn: true)
+
+        XCTAssertFalse(vm.showAnalyticsPrompt)
+        XCTAssertTrue(vm.showHarnessOnboarding)
+        assertAtMostOneSheetPresented(vm)
+    }
+
+    /// Mirrors ContentView's sheet binding, which routes any dismissal — Escape or a
+    /// click outside included — through the view model rather than setting the flag.
+    /// Calling the method directly would pass even if the binding bypassed it.
+    private func dismissKeychainPrimerThroughSheetBinding(_ vm: AppViewModel) {
+        let binding = Binding(
+            get: { vm.showKeychainAccessPrimer },
+            set: { newValue in
+                if !newValue && vm.showKeychainAccessPrimer {
+                    vm.dismissKeychainAccessPrimer()
+                } else {
+                    vm.showKeychainAccessPrimer = newValue
+                }
+            }
+        )
+        binding.wrappedValue = false
+    }
+
+    func testHarnessOnboardingFollowsKeychainPrimerSheetDismissal() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        defaults.set(bundleVersion, forKey: "proxypilot.analyticsPromptShownVersion")
+        let vm = AppViewModel(defaults: defaults)
+        vm.showKeychainAccessPrimer = true
+        vm.maybeShowHarnessOnboarding()
+        XCTAssertFalse(vm.showHarnessOnboarding)
+
+        dismissKeychainPrimerThroughSheetBinding(vm)
+
+        XCTAssertFalse(vm.showKeychainAccessPrimer)
+        XCTAssertTrue(vm.showHarnessOnboarding)
+        assertAtMostOneSheetPresented(vm)
+    }
+
+    /// The Keychain primer had no dismissal chain point before this flow existed;
+    /// without one the tour never appears for anyone with an authorized stored key.
+    func testHarnessOnboardingFollowsKeychainPrimerDismissal() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        defaults.set(bundleVersion, forKey: "proxypilot.analyticsPromptShownVersion")
+        let vm = AppViewModel(defaults: defaults)
+        vm.showKeychainAccessPrimer = true
+        vm.maybeShowHarnessOnboarding()
+        XCTAssertFalse(vm.showHarnessOnboarding)
+
+        vm.dismissKeychainAccessPrimer()
+
+        XCTAssertTrue(vm.showHarnessOnboarding)
+        assertAtMostOneSheetPresented(vm)
+    }
+
+    /// Manual re-entry must not let a later `maybeShowAnalyticsPrompt()` double-present.
+    func testAnalyticsPromptSuppressedWhileHarnessTourIsUp() {
+        defaults.set(true, forKey: "proxypilot.didCompleteOnboarding")
+        let vm = AppViewModel(defaults: defaults)
+        vm.openHarnessOnboarding(surface: "harnesses_tab")
+        XCTAssertTrue(vm.showHarnessOnboarding)
+
+        vm.maybeShowAnalyticsPrompt()
+
+        XCTAssertFalse(vm.showAnalyticsPrompt)
+        assertAtMostOneSheetPresented(vm)
+    }
+
+    func testResetToFreshInstallClearsHarnessOnboardingState() async {
+        defaults.set(bundleVersion, forKey: harnessPresentedKey)
+        defaults.set(bundleVersion, forKey: harnessCompletedKey)
+        let vm = AppViewModel(defaults: defaults)
+        XCTAssertFalse(vm.harnessOnboardingBadgeVisible)
+
+        await vm.resetToFreshInstall()
+
+        XCTAssertNil(defaults.string(forKey: harnessPresentedKey))
+        XCTAssertNil(defaults.string(forKey: harnessCompletedKey))
+        XCTAssertTrue(vm.harnessOnboardingBadgeVisible)
+        XCTAssertFalse(vm.showHarnessOnboarding)
     }
 }

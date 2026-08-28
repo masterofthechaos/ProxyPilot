@@ -3,6 +3,7 @@ import Foundation
 enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case home
     case history
+    case harnesses
     case proxy
     case routing
     case keys
@@ -11,9 +12,9 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 
     var id: Self { self }
 
-    static let sidebarSections: [SettingsSection] = [.home, .history, .proxy, .routing, .keys, .advanced, .customization]
+    static let sidebarSections: [SettingsSection] = [.home, .history, .harnesses, .proxy, .routing, .keys, .advanced, .customization]
 
-    static let collapsedTabSections: [SettingsSection] = [.home, .history, .proxy, .routing, .keys, .advanced]
+    static let collapsedTabSections: [SettingsSection] = [.home, .history, .harnesses, .proxy, .routing, .keys, .advanced]
 
     static func availableSidebarSections(repoGPSRoutingEnabled: Bool) -> [SettingsSection] {
         sidebarSections.filter { repoGPSRoutingEnabled || $0 != .routing }
@@ -29,6 +30,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "Home"
         case .history:
             return "Session History"
+        case .harnesses:
+            return "Coding Harnesses"
         case .proxy:
             return "Proxy"
         case .routing:
@@ -48,6 +51,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "Home"
         case .history:
             return "History"
+        case .harnesses:
+            return "Harnesses"
         case .proxy:
             return "Proxy"
         case .routing:
@@ -67,6 +72,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "Session overview"
         case .history:
             return "Past sessions"
+        case .harnesses:
+            return "Install coding harnesses"
         case .proxy:
             return "Routing and models"
         case .routing:
@@ -86,6 +93,8 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
             return "house"
         case .history:
             return "clock.arrow.circlepath"
+        case .harnesses:
+            return "terminal"
         case .proxy:
             return "network"
         case .routing:

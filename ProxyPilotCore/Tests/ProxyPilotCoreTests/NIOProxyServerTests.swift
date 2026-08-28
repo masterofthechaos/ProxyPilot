@@ -354,6 +354,75 @@ struct NIOProxyServerTests {
         try await stub.stop()
     }
 
+    @Test func repoGPSTutorProjectsServerToolsAndStripsLocalPolicyHeader() async throws {
+        let stub = StubUpstream()
+        let upstreamPort = try await stub.start(
+            statusCode: 200,
+            body: #"{"id":"chatcmpl-tutor","choices":[]}"#,
+            requireJSONRequest: true
+        )
+        let config = ProxyConfiguration(
+            port: 0,
+            upstreamProvider: .openRouter,
+            upstreamAPIBaseURL: "http://127.0.0.1:\(upstreamPort)",
+            requiresAuth: false
+        )
+        let server = NIOProxyServer()
+        let port = try await server.start(config: config)
+
+        let envelope: [String: Any] = [
+            "version": 1,
+            "backend": "openrouter",
+            "consultation_policy": "automatic",
+            "advisor": [
+                "model": "~advisor/integration",
+                "max_completion_tokens": 1024,
+                "max_tool_calls": 2,
+            ],
+            "worker": [
+                "model": "~worker/integration",
+                "max_completion_tokens": 512,
+                "max_tool_calls": 3,
+            ],
+            "worker_web_access": false,
+        ]
+        let envelopeData = try JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys])
+        let envelopeHeader = envelopeData.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("repogps", forHTTPHeaderField: "X-ProxyPilot-Client")
+        request.setValue("00000000-0000-0000-0000-000000000123", forHTTPHeaderField: "X-ProxyPilot-Session-ID")
+        request.setValue(envelopeHeader, forHTTPHeaderField: TutorRequestAdapter.headerName)
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": "test-model",
+            "messages": [["role": "user", "content": "test"]],
+            "tools": [[
+                "type": "function",
+                "function": ["name": "read_file", "parameters": ["type": "object"]],
+            ]],
+        ])
+
+        let (_, response) = try await URLSession.shared.data(for: request)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+
+        let capturedRequest = try #require(stub.requests().first)
+        #expect(capturedRequest.headerValue(TutorRequestAdapter.headerName) == nil)
+        let capturedData = try #require(capturedRequest.body.data(using: .utf8))
+        let captured = try #require(JSONSerialization.jsonObject(with: capturedData) as? [String: Any])
+        let tools = try #require(captured["tools"] as? [[String: Any]])
+        #expect(tools.map { $0["type"] as? String } == [
+            "function", "openrouter:advisor", "openrouter:subagent",
+        ])
+
+        try await server.stop()
+        try await stub.stop()
+    }
+
     @Test func activeAliasIsRewrittenBeforeUpstream() async throws {
         let stub = StubUpstream()
         let upstreamPort = try await stub.start(statusCode: 200, body: #"{"id":"alias","model":"actual-model","choices":[]}"#, requireJSONRequest: true)

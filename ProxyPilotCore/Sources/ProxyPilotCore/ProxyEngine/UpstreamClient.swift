@@ -222,7 +222,14 @@ enum UpstreamClient {
 
         // Forward relevant headers, excluding auth headers (we set our own)
         // and any client API key headers that could leak to the upstream provider.
-        let skipHeaders: Set<String> = ["authorization", "host", "content-length", "x-api-key", "api-key"]
+        let skipHeaders: Set<String> = [
+            "authorization",
+            "host",
+            "content-length",
+            "x-api-key",
+            "api-key",
+            TutorRequestAdapter.headerName.lowercased(),
+        ]
         for (name, value) in headers {
             if skipHeaders.contains(name.lowercased()) { continue }
             request.setValue(value, forHTTPHeaderField: name)

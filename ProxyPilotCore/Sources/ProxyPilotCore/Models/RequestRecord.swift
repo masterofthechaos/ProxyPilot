@@ -12,6 +12,13 @@ public struct RequestRecord: Sendable, Codable, Equatable {
     public let durationSeconds: TimeInterval
     public let path: String
     public let wasStreaming: Bool
+    /// Provider identity is intentionally stored separately from `model` so
+    /// privacy-preserving analytics can inventory provider pathways without
+    /// ever transmitting a specific model slug.
+    public let providerIdentifier: String?
+    public let promptCachingMode: String?
+    public let contextCompactionEnabled: Bool?
+    public let translationMode: String?
 
     public init(
         timestamp: Date = Date(),
@@ -23,7 +30,11 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         promptCacheWriteTokens: Int? = nil,
         durationSeconds: TimeInterval,
         path: String,
-        wasStreaming: Bool
+        wasStreaming: Bool,
+        providerIdentifier: String? = nil,
+        promptCachingMode: String? = nil,
+        contextCompactionEnabled: Bool? = nil,
+        translationMode: String? = nil
     ) {
         self.timestamp = timestamp
         self.model = model
@@ -35,5 +46,9 @@ public struct RequestRecord: Sendable, Codable, Equatable {
         self.durationSeconds = durationSeconds
         self.path = path
         self.wasStreaming = wasStreaming
+        self.providerIdentifier = providerIdentifier
+        self.promptCachingMode = promptCachingMode
+        self.contextCompactionEnabled = contextCompactionEnabled
+        self.translationMode = translationMode
     }
 }

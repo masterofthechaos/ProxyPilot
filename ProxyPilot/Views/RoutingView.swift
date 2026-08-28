@@ -25,6 +25,7 @@ struct RoutingView: View {
     @State private var pendingProvider: UpstreamProvider = .openRouter
     @State private var pendingModel: String = ""
     @State private var hasLoadedPending = false
+    @State private var cliInstallError: String?
 
     var body: some View {
         Form {
@@ -84,18 +85,16 @@ struct RoutingView: View {
         Section {
             switch routeControl.availability {
             case .missing:
-                Label(
-                    "ProxyPilot CLI not found. Install it to route RepoGPS.",
-                    systemImage: "exclamationmark.triangle"
+                cliDependencyRow(
+                    message: "ProxyPilot CLI not found. Install it to route RepoGPS.",
+                    actionTitle: "Install ProxyPilot CLI"
                 )
-                .foregroundStyle(.orange)
 
             case .tooOld(let url):
-                Label(
-                    "The ProxyPilot CLI at \(url.path) predates route control. Update it to steer RepoGPS from here.",
-                    systemImage: "exclamationmark.triangle"
+                cliDependencyRow(
+                    message: "The ProxyPilot CLI at \(url.path) predates route control. Update it to steer RepoGPS from here.",
+                    actionTitle: "Update ProxyPilot CLI"
                 )
-                .foregroundStyle(.orange)
 
             case .ready:
                 Picker("Provider", selection: $pendingProvider) {
@@ -166,6 +165,40 @@ struct RoutingView: View {
     }
 
     // MARK: - Shared pieces
+
+    private func cliDependencyRow(message: String, actionTitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 12) {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+
+                Spacer()
+
+                Button(actionTitle) {
+                    Task {
+                        if await vm.repoGPS.installProxyPilotCLI() {
+                            cliInstallError = nil
+                            await routeControl.refresh()
+                            loadPendingFromRoute()
+                        } else {
+                            cliInstallError = vm.repoGPS.lastError
+                        }
+                    }
+                }
+                .disabled(vm.repoGPS.isInstallingProxyPilotCLI)
+
+                if vm.repoGPS.isInstallingProxyPilotCLI {
+                    ProgressView().controlSize(.small)
+                }
+            }
+
+            if let cliInstallError {
+                Text(cliInstallError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
 
     private func routeStatusRow(isLive: Bool, title: String, caption: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {

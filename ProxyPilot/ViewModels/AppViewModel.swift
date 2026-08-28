@@ -89,6 +89,13 @@ final class AppViewModel: ObservableObject {
     private static let preflightSnapshotDefaultsKey = "proxypilot.lastPreflightSnapshot"
     private static let suppressKeychainPrimerDefaultsKey = "proxypilot.suppressKeychainPrimer"
     private static let analyticsPromptShownVersionKey = "proxypilot.analyticsPromptShownVersion"
+    /// Records the version whose first open auto-presented the harness tour. Gated on
+    /// *presence*, unlike the analytics prompt above, which re-asks every version by design:
+    /// a one-time tour that reappeared on each bump would read as nagging.
+    private static let harnessOnboardingPresentedVersionKey = "proxypilot.harnessOnboarding.presentedVersion"
+    /// Set only when the tour is actually finished. Skipping leaves this nil so the sidebar
+    /// pill survives as the way back.
+    private static let harnessOnboardingCompletedVersionKey = "proxypilot.harnessOnboarding.completedVersion"
     private static let xcodeDefaultsDomain = "com.apple.dt.Xcode"
     private static let xcodeAgentAPIKeyOverrideDefaultsKey = "IDEChatClaudeAgentAPIKeyOverride"
     private static let selectedAgentModeDefaultsKey = "proxypilot.agentModes.selectedMode"
@@ -121,6 +128,7 @@ final class AppViewModel: ObservableObject {
     /// independent readers of the same `route.json` is also just a second source
     /// of truth waiting to disagree with the first.
     let routeControl = RouteControlService()
+    let repoGPS = RepoGPSService()
 
     private let defaults: UserDefaults
     private let proxyService: ProxyService
@@ -194,6 +202,7 @@ final class AppViewModel: ObservableObject {
     private var providerManagerCancellable: AnyCancellable?
     private var lifecycleManagerCancellable: AnyCancellable?
     private var routeControlCancellable: AnyCancellable?
+    private var repoGPSCancellable: AnyCancellable?
     /// Throttles the route poll. `RouteControlService.refresh()` spawns two
     /// short-lived processes, and the value it reads only changes when someone
     /// runs `route set` — so polling it on the 10s status timer would be two
@@ -463,6 +472,7 @@ final class AppViewModel: ObservableObject {
                 }
                 guard let events else { return }
                 self.lastImportedSessionReportFingerprint = fingerprint
+                self.telemetryService.trackSessionReportEvents(events, telemetryOptIn: self.telemetryOptIn)
                 self.applyExternalSessionReportEvents(events)
             }
         }
@@ -492,7 +502,10 @@ final class AppViewModel: ObservableObject {
     @Published var xcodeInstallations: [XcodeInstallation] = []
     var hasCompatibleXcode: Bool { xcodeInstallations.contains { $0.supportsAgenticCoding } }
     @Published private(set) var agentModesCapability = XcodeDetectionService.agentModesCapability(for: [])
-    let repoGPSRoutingFeatureEnabled = RepoGPSRoutingFeatureFlag.current
+    /// Routing is a permanent product surface. Managed, external, missing, and
+    /// incompatible RepoGPS states belong inside that surface as actionable
+    /// status; they must not make the navigation destination disappear.
+    var repoGPSRoutingFeatureEnabled: Bool { true }
     @Published private(set) var agentRuntimeStatus: AgentRuntimeStatus = .notInstalled
     @Published private(set) var proxyPilotAgentRegistrationStatus: ACPRegistrationManager.Status?
     @Published private(set) var proxyPilotAgentStatusText = "Not installed"
@@ -533,7 +546,7 @@ final class AppViewModel: ObservableObject {
         return providerManager.hasUpstreamKey
     }
     var hasMasterKey: Bool { KeychainService.exists(key: .litellmMasterKey) }
-    var requiresMasterKey: Bool { !useBuiltInProxy || requireLocalAuth || hasUpstreamKey }
+    var requiresMasterKey: Bool { !useBuiltInProxy || requireLocalAuth }
     var hasRequiredMasterKey: Bool { !requiresMasterKey || hasMasterKey }
 
     var isRunning: Bool {
@@ -568,6 +581,87 @@ final class AppViewModel: ObservableObject {
         case .portOccupied(let statusCode):
             return String(localized: "Port occupied by another service") + " (HTTP \(statusCode))"
         }
+    }
+
+    enum ToolbarProxyStatusKind: Equatable {
+        case stopped
+        case gui
+        case cli
+        case repoGPS
+        case issue
+    }
+
+    struct ToolbarProxyStatus: Equatable {
+        var kind: ToolbarProxyStatusKind
+        var compactText: String
+        var fullText: String
+
+        var isRunning: Bool {
+            switch kind {
+            case .gui, .cli, .repoGPS:
+                return true
+            case .stopped, .issue:
+                return false
+            }
+        }
+    }
+
+    static func toolbarProxyStatus(
+        for runtimeStatus: ProxyRuntimeStatus,
+        repoGPSActive: Bool,
+        repoGPSLeasePresent: Bool = false
+    ) -> ToolbarProxyStatus {
+        if repoGPSActive {
+            return ToolbarProxyStatus(
+                kind: .repoGPS,
+                compactText: "RepoGPS",
+                fullText: String(localized: "RepoGPS in flight")
+            )
+        }
+
+        if repoGPSLeasePresent, runtimeStatus == .runningExternal {
+            return ToolbarProxyStatus(
+                kind: .repoGPS,
+                compactText: "RepoGPS",
+                fullText: String(localized: "RepoGPS route ready")
+            )
+        }
+
+        switch runtimeStatus {
+        case .stopped:
+            return ToolbarProxyStatus(
+                kind: .stopped,
+                compactText: String(localized: "Stopped"),
+                fullText: String(localized: "Stopped")
+            )
+        case .runningInApp:
+            return ToolbarProxyStatus(
+                kind: .gui,
+                compactText: "GUI",
+                fullText: String(localized: "Running (GUI)")
+            )
+        case .runningExternal:
+            return ToolbarProxyStatus(
+                kind: .cli,
+                compactText: "CLI",
+                fullText: String(localized: "Running (CLI)")
+            )
+        case .portOccupied(let statusCode):
+            let text = String(localized: "Port occupied by another service") + " (HTTP \(statusCode))"
+            return ToolbarProxyStatus(
+                kind: .issue,
+                compactText: String(localized: "Conflict"),
+                fullText: text
+            )
+        }
+    }
+
+    var toolbarProxyStatus: ToolbarProxyStatus {
+        Self.toolbarProxyStatus(
+            for: proxyRuntimeStatus,
+            repoGPSActive: repoGPS.session.active,
+            repoGPSLeasePresent: repoGPS.session.lease != nil
+        )
     }
 
     private static func httpReasonPhrase(_ status: Int) -> String {
@@ -859,6 +953,7 @@ final class AppViewModel: ObservableObject {
             try? KeychainService.delete(key: key)
         }
         customProviderStorage.removeAll()
+        telemetryService.resetForFreshInstall()
 
         defaults.removeObject(forKey: ProviderManager.upstreamProviderDefaultsKey)
         defaults.removeObject(forKey: Self.didCompleteOnboardingDefaultsKey)
@@ -895,6 +990,8 @@ final class AppViewModel: ObservableObject {
         defaults.removeObject(forKey: ProviderManager.verifiedFilterDefaultsKey)
         defaults.removeObject(forKey: Self.suppressKeychainPrimerDefaultsKey)
         defaults.removeObject(forKey: Self.analyticsPromptShownVersionKey)
+        defaults.removeObject(forKey: Self.harnessOnboardingPresentedVersionKey)
+        defaults.removeObject(forKey: Self.harnessOnboardingCompletedVersionKey)
         defaults.removeObject(forKey: Self.anthropicFallbackDefaultsKey)
         defaults.removeObject(forKey: ProviderManager.xcodeAgentModelLegacyDefaultsKey)
         defaults.removeObject(forKey: Self.preflightExpandedDefaultsKey)
@@ -986,6 +1083,8 @@ final class AppViewModel: ObservableObject {
         suppressKeychainAccessPrimer = false
         autoRestartEnabled = true
         hasEvaluatedKeychainPrimerThisLaunch = false
+        showHarnessOnboarding = false
+        harnessOnboardingBadgeVisible = true
 
         providerKeyDrafts = [:]
         providerKeyEditing = [:]
@@ -1273,7 +1372,7 @@ final class AppViewModel: ObservableObject {
             copilotToolCallTestSucceeded = result.sawToolCall
             copilotToolCallTestOutput = result.summary
             if result.sawToolCall {
-                markFirstSuccessfulRequestIfNeeded()
+                trackSuccessfulEngagement("copilot_tool_test_succeeded")
             }
         } catch {
             let issue = upstreamIssueFor(
@@ -1305,12 +1404,22 @@ final class AppViewModel: ObservableObject {
         didSet {
             proxyLifecycle.useBuiltInProxy = useBuiltInProxy
             refreshStatus()
+            if providerManager.isInitialized, oldValue != useBuiltInProxy {
+                trackFeatureUsed("proxy_runtime", action: "changed", mode: useBuiltInProxy ? "builtin" : "external")
+            }
         }
     }
 
     @Published var anthropicTranslatorFallbackEnabled: Bool = false {
         didSet {
             defaults.set(anthropicTranslatorFallbackEnabled, forKey: Self.anthropicFallbackDefaultsKey)
+            if providerManager.isInitialized, oldValue != anthropicTranslatorFallbackEnabled {
+                trackFeatureUsed(
+                    "anthropic_translation",
+                    action: "mode_changed",
+                    mode: anthropicTranslatorFallbackEnabled ? "legacy_fallback" : "hardened"
+                )
+            }
         }
     }
 
@@ -1347,6 +1456,21 @@ final class AppViewModel: ObservableObject {
     @Published var telemetryOptIn: Bool = false {
         didSet {
             defaults.set(telemetryOptIn, forKey: Self.telemetryOptInDefaultsKey)
+        }
+    }
+
+    func setTelemetryOptIn(_ enabled: Bool, surface: String) {
+        guard telemetryOptIn != enabled else { return }
+        telemetryOptIn = enabled
+        if enabled {
+            telemetryService.track(
+                name: "analytics_enabled",
+                payload: [
+                    "consent_contract_version": "2",
+                    "surface": surface
+                ],
+                telemetryOptIn: true
+            )
         }
     }
 
@@ -1441,6 +1565,9 @@ final class AppViewModel: ObservableObject {
         didSet {
             defaults.set(promptCachingMode.rawValue, forKey: Self.promptCachingModeDefaultsKey)
             persistAgentLaunchSettings()
+            if providerManager.isInitialized, oldValue != promptCachingMode {
+                trackFeatureUsed("prompt_caching", action: "mode_changed", mode: promptCachingMode.rawValue)
+            }
         }
     }
 
@@ -1448,6 +1575,13 @@ final class AppViewModel: ObservableObject {
         didSet {
             defaults.set(contextCompactionEnabled, forKey: Self.contextCompactionEnabledDefaultsKey)
             persistAgentLaunchSettings()
+            if providerManager.isInitialized, oldValue != contextCompactionEnabled {
+                trackFeatureUsed(
+                    "context_compaction",
+                    action: contextCompactionEnabled ? "enabled" : "disabled",
+                    mode: contextCompactionEnabled ? "enabled" : "disabled"
+                )
+            }
         }
     }
 
@@ -1543,11 +1677,11 @@ final class AppViewModel: ObservableObject {
     }
 
     var liquidGlassPreferenceTitle: String {
-        String(localized: "Use Liquid Glass for control strips")
+        String(localized: "Use Liquid Glass for navigation and controls")
     }
 
     var liquidGlassPreferenceDescription: String {
-        String(localized: "This only affects ProxyPilot's custom compact control strips and preview. Native sidebar, toolbar, sheets, and menus follow macOS automatically.")
+        String(localized: "Applies Liquid Glass to ProxyPilot's window-bounded sidebar and custom compact control strips. Native toolbar, sheets, and menus continue to follow macOS.")
     }
 
     func confirmInputOutputLoggingEnabled() {
@@ -1794,6 +1928,10 @@ final class AppViewModel: ObservableObject {
 
     @Published var showKeychainAccessPrimer: Bool = false
     @Published var showAnalyticsPrompt: Bool = false
+    @Published var showHarnessOnboarding: Bool = false
+    /// Drives the sidebar-footer pill. Visible until the tour is completed, including
+    /// after a skip, so the invitation outlives the one sheet presentation.
+    @Published var harnessOnboardingBadgeVisible: Bool = false
 
     @Published var suppressKeychainAccessPrimer: Bool = false {
         didSet {
@@ -1813,7 +1951,10 @@ final class AppViewModel: ObservableObject {
     }
 
     var shouldShowToolbarStatus: Bool {
-        if statusText != Self.statusText(for: .stopped) {
+        // Preserve the lifecycle's existing visibility contract: tests and
+        // recovery transitions may publish status copy just before the typed
+        // runtime state catches up. RepoGPS has an independent lease signal.
+        if repoGPS.session.active || statusText != Self.statusText(for: .stopped) {
             return true
         }
 
@@ -2101,7 +2242,7 @@ final class AppViewModel: ObservableObject {
             return active.isEmpty ? "Running, no applied model recorded" : active
         }
         if proxyRuntimeStatus == .runningExternal {
-            return "External proxy - unknown to GUI"
+            return "Inactive — external CLI owns the proxy"
         }
         return "Not applied until proxy start"
     }
@@ -2204,10 +2345,10 @@ final class AppViewModel: ObservableObject {
 
     var alwaysOnTelemetryDisclosureText: String {
         if Self.isAlphaBuild {
-            return "Alpha builds always send coarse failure-mode analytics for preflight failures, proxy start failures, and crash markers when a remote analytics key is bundled. Prompts, completions, API keys, provider keys, model outputs, URLs, provider names, and system details are not sent."
+            return "Alpha builds keep health and diagnostics events on this Mac; remote PostHog delivery is disabled. Prompts, completions, API keys, URLs, raw errors, repository names, device identifiers, and specific model names are never sent."
         }
 
-        return "Always-on health reporting sends only `app_opened`, `app_version`, and `build_number` to PostHog at https://us.i.posthog.com/capture/ so update health can be counted. Optional analytics add session/proxy events only when this toggle is enabled. Prompts, completions, API keys, provider keys, model outputs, and system details are not sent."
+        return "Always-on health reporting sends only app-open, app-version, and build-number data to PostHog. When enabled, optional analytics add provider usage, bucketed request/token/performance/cache summaries, client surface, feature modes, setup progress, and normalized failures. Prompts, completions, API keys, URLs, raw errors, repository names, device identifiers, and specific model names are never sent."
     }
 
     var contextualTerminologyHelpText: String {
@@ -2881,6 +3022,7 @@ final class AppViewModel: ObservableObject {
         requireLocalAuth = defaults.bool(forKey: Self.requireLocalAuthDefaultsKey)
 
         showOnboardingWizard = !defaults.bool(forKey: Self.didCompleteOnboardingDefaultsKey)
+        harnessOnboardingBadgeVisible = defaults.string(forKey: Self.harnessOnboardingCompletedVersionKey) == nil
 
         if let data = defaults.data(forKey: Self.preflightSnapshotDefaultsKey),
            let decoded = try? JSONDecoder().decode([PreflightCheckResult].self, from: data) {
@@ -2910,6 +3052,10 @@ final class AppViewModel: ObservableObject {
                 enrichedPayload = payload
             }
             self.telemetryService.track(name: name, payload: enrichedPayload, telemetryOptIn: self.telemetryOptIn)
+        }
+        localProxyServer.telemetryTracker = { [weak self] name, payload in
+            guard let self else { return }
+            self.telemetryService.track(name: name, payload: payload, telemetryOptIn: self.telemetryOptIn)
         }
         proxyLifecycle.proxyURLValidator = { [weak self] requireLocalhost in
             guard let self else { throw ProxyLifecycleManager.IssueError(issue: AppIssue(
@@ -2954,6 +3100,12 @@ final class AppViewModel: ObservableObject {
                 self?.objectWillChange.send()
             }
 
+        repoGPSCancellable = repoGPS.objectWillChange
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+
         let priorSessionLikelyCrashed = telemetryService.beginSession()
         telemetryService.trackCoreHealthAppOpen(
             appVersion: Self.appVersion,
@@ -2977,6 +3129,7 @@ final class AppViewModel: ObservableObject {
         providerManager.isInitialized = true
         runPreflightChecks(trackEvent: false)
         if Self.shouldRunLaunchBackgroundWork() {
+            repoGPS.startMonitoring()
             Task { await detectXcodeInstallations() }
             if upstreamProvider == .openRouter {
                 Task { await providerManager.loadVerifiedModels() }
@@ -3088,6 +3241,8 @@ final class AppViewModel: ObservableObject {
 
     func dismissKeychainAccessPrimer() {
         showKeychainAccessPrimer = false
+        maybeShowAnalyticsPrompt()
+        maybeShowHarnessOnboarding()
     }
 
     // MARK: - Analytics Opt-In Prompt
@@ -3095,18 +3250,69 @@ final class AppViewModel: ObservableObject {
     func maybeShowAnalyticsPrompt() {
         guard Self.analyticsPromptAvailable else { return }
         guard defaults.string(forKey: Self.analyticsPromptShownVersionKey) != Self.appVersion else { return }
-        guard !showOnboardingWizard else { return }
+        guard !showOnboardingWizard, !showKeychainAccessPrimer, !showHarnessOnboarding else { return }
         showAnalyticsPrompt = true
     }
 
     func dismissAnalyticsPrompt(optIn: Bool) {
-        telemetryOptIn = optIn
+        setTelemetryOptIn(optIn, surface: "follow_up_prompt")
         markAnalyticsPromptHandledForCurrentVersion()
         showAnalyticsPrompt = false
+        maybeShowHarnessOnboarding()
     }
 
     private func markAnalyticsPromptHandledForCurrentVersion() {
         defaults.set(Self.appVersion, forKey: Self.analyticsPromptShownVersionKey)
+    }
+
+    // MARK: - Coding Harness Tour
+
+    /// Auto-presents the RepoGPS tour once, on the first open of a version that ships it.
+    /// Deliberately last in the launch sheet chain: the analytics decision comes first, so
+    /// the tour itself can be attributed for anyone who opted in.
+    func maybeShowHarnessOnboarding() {
+        guard defaults.string(forKey: Self.harnessOnboardingPresentedVersionKey) == nil else { return }
+        guard !showOnboardingWizard, !showKeychainAccessPrimer, !showAnalyticsPrompt else { return }
+
+        defaults.set(Self.appVersion, forKey: Self.harnessOnboardingPresentedVersionKey)
+        presentHarnessOnboarding(surface: "first_open_after_update")
+    }
+
+    /// Manual re-entry from the sidebar pill or the Coding Harnesses tab. Ignores both
+    /// persisted keys so the tour is always available on request.
+    func openHarnessOnboarding(surface: String) {
+        guard !showOnboardingWizard, !showKeychainAccessPrimer, !showAnalyticsPrompt else { return }
+        presentHarnessOnboarding(surface: surface)
+    }
+
+    private func presentHarnessOnboarding(surface: String) {
+        showHarnessOnboarding = true
+        telemetryService.track(
+            name: "feature_used",
+            payload: ["feature": "harness_onboarding", "action": "started", "mode": surface],
+            telemetryOptIn: telemetryOptIn
+        )
+    }
+
+    /// `completed: false` is a skip: the sheet closes but the sidebar pill stays, so the
+    /// invitation survives without a second interruption.
+    func finishHarnessOnboarding(completed: Bool) {
+        showHarnessOnboarding = false
+        defaults.set(Self.appVersion, forKey: Self.harnessOnboardingPresentedVersionKey)
+
+        if completed {
+            defaults.set(Self.appVersion, forKey: Self.harnessOnboardingCompletedVersionKey)
+            harnessOnboardingBadgeVisible = false
+        }
+
+        telemetryService.track(
+            name: "feature_used",
+            payload: [
+                "feature": "harness_onboarding",
+                "action": completed ? "completed" : "skipped"
+            ],
+            telemetryOptIn: telemetryOptIn
+        )
     }
 
     private static var isAlphaBuild: Bool {
@@ -3433,6 +3639,7 @@ final class AppViewModel: ObservableObject {
         }
         showOnboardingWizard = false
         maybeShowAnalyticsPrompt()
+        maybeShowHarnessOnboarding()
         telemetryService.track(name: "onboarding_completed", telemetryOptIn: telemetryOptIn)
         clearIssue()
     }
@@ -3545,7 +3752,7 @@ final class AppViewModel: ObservableObject {
         do {
             let baseURL = try validatedProxyURL(requireLocalhost: false).url
             modelsJSON = try await proxyService.fetchModels(baseURL: baseURL, masterKey: masterKey)
-            markFirstSuccessfulRequestIfNeeded()
+            trackSuccessfulEngagement("proxy_models_fetch_succeeded")
         } catch {
             applyIssue(issueFor(
                 error,
@@ -3652,7 +3859,7 @@ final class AppViewModel: ObservableObject {
                 providerManager.applyFetchedUpstreamModels(models)
                 providerManager.reconcileXcodeAgentModelSelection()
             }
-            markFirstSuccessfulRequestIfNeeded()
+            trackSuccessfulEngagement("provider_models_fetch_succeeded")
         } catch {
             let issue = upstreamIssueFor(
                 error,
@@ -3771,7 +3978,7 @@ final class AppViewModel: ObservableObject {
             )
             upstreamTestModelUsed = model
             upstreamTestOutput = text.isEmpty ? "(empty response)" : text
-            markFirstSuccessfulRequestIfNeeded()
+            trackSuccessfulEngagement("upstream_test_succeeded")
         } catch {
             let issue = upstreamIssueFor(
                 error,
@@ -4348,11 +4555,8 @@ final class AppViewModel: ObservableObject {
         }
 
         let upstreamKey = selectedUpstreamAPIKey()
-        let forwardsCredential = !(upstreamKey?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty ?? true)
         let masterKey: String
-        if requireLocalAuth || forwardsCredential {
+        if requireLocalAuth {
             guard let configuredMasterKey = KeychainService.get(key: .litellmMasterKey)?
                 .trimmingCharacters(in: .whitespacesAndNewlines),
                 !configuredMasterKey.isEmpty else {
@@ -4411,11 +4615,12 @@ final class AppViewModel: ObservableObject {
             sessionID: sessionID,
             masterKey: masterKey,
             upstreamProvider: provider,
+            analyticsProviderIdentifier: hasActiveCustomProvider ? "custom" : provider.rawValue,
             upstreamAPIBase: upstreamBase,
             upstreamAPIKey: upstreamKey,
             allowedModels: allowedModels,
             denyRequestsWhenAllowlistEmpty: true,
-            requiresAuth: requireLocalAuth || forwardsCredential,
+            requiresAuth: requireLocalAuth,
             anthropicTranslatorMode: anthropicTranslatorFallbackEnabled ? .legacyFallback : .hardened,
             miniMaxRoutingMode: providerManager.miniMaxRoutingMode,
             preferredAnthropicUpstreamModel: preferredModel.isEmpty
@@ -4495,10 +4700,19 @@ final class AppViewModel: ObservableObject {
         logText = ""
     }
 
-    private func markFirstSuccessfulRequestIfNeeded() {
+    private func trackSuccessfulEngagement(_ eventName: String) {
+        telemetryService.track(name: eventName, telemetryOptIn: telemetryOptIn)
         guard !hasTrackedFirstSuccessfulRequest else { return }
         hasTrackedFirstSuccessfulRequest = true
         telemetryService.track(name: "first_successful_request", telemetryOptIn: telemetryOptIn)
+    }
+
+    private func trackFeatureUsed(_ feature: String, action: String, mode: String) {
+        telemetryService.track(
+            name: "feature_used",
+            payload: ["feature": feature, "action": action, "mode": mode],
+            telemetryOptIn: telemetryOptIn
+        )
     }
 
     private func trackProviderEndpointFailure(
@@ -4982,6 +5196,7 @@ final class AppViewModel: ObservableObject {
             try agentLinkManager.remove()
             try agentRuntimeManager.remove()
             proxyPilotAgentStatusText = "Removed. Reopen Xcode Intelligence settings if the entry remains visible."
+            trackFeatureUsed("proxy_pilot_agent", action: "removed", mode: "managed")
             await refreshProxyPilotAgentState()
         } catch {
             proxyPilotAgentStatusText = error.localizedDescription

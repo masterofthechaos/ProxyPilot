@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var highlightedProxySection: ProxySectionFocus?
     @State private var proxyFocusRequestID: Int = 0
     @State private var windowWidth: CGFloat = 0
+    @State private var sidebarIsCollapsed = false
     @AppStorage("proxypilot.layoutModePreference") private var layoutModePreference: LayoutModePreference = .automatic
     @State private var modelSearchText = ""
     @State private var modelProviderFilter = ""
@@ -100,6 +101,7 @@ struct ContentView: View {
             vm.startLogUpdates()
             vm.maybeShowKeychainAccessPrimerOnLaunch()
             vm.maybeShowAnalyticsPrompt()
+            vm.maybeShowHarnessOnboarding()
             Task { await vm.refreshCopilotSidecarStatus() }
         }
         .onDisappear {
@@ -114,7 +116,15 @@ struct ContentView: View {
         }
         .sheet(isPresented: Binding(
             get: { vm.showKeychainAccessPrimer },
-            set: { vm.showKeychainAccessPrimer = $0 }
+            set: { newValue in
+                // Escape or a click outside would otherwise set the flag directly and
+                // skip the chain that hands off to the next launch sheet.
+                if !newValue && vm.showKeychainAccessPrimer {
+                    vm.dismissKeychainAccessPrimer()
+                } else {
+                    vm.showKeychainAccessPrimer = newValue
+                }
+            }
         )) {
             KeychainAccessPrimerView()
                 .environmentObject(vm)
@@ -128,6 +138,20 @@ struct ContentView: View {
                 onDisable: { vm.dismissAnalyticsPrompt(optIn: false) }
             )
             .interactiveDismissDisabled(true)
+        }
+        .sheet(isPresented: Binding(
+            get: { vm.showHarnessOnboarding },
+            set: { newValue in
+                // A dismissal that did not go through a button is a skip, not a completion.
+                if !newValue && vm.showHarnessOnboarding {
+                    vm.finishHarnessOnboarding(completed: false)
+                } else {
+                    vm.showHarnessOnboarding = newValue
+                }
+            }
+        )) {
+            HarnessOnboardingView(onOpenHarnesses: { selectedSection = .harnesses })
+                .environmentObject(vm)
         }
         .alert(
             String(localized: "ProxyPilot Needs to Make a Reversible System Change"),
@@ -149,34 +173,44 @@ struct ContentView: View {
         .environment(\.proxypilotLiquidGlassEnabled, effectiveLiquidGlassEnabled)
     }
 
-    /// Deliberately a hand-rolled `HStack` and not a `NavigationSplitView`.
+    /// Deliberately a window-bounded `HStack` and not a `NavigationSplitView`.
     ///
-    /// The split view was tried (2026-07-29) to get the system-drawn Liquid Glass
-    /// sidebar material, which is the only supported way to have it. It had to be
-    /// reverted: inside `NavigationSplitView` the sidebar column's viewport height is
-    /// derived from the split rather than the window, and on a tall window the Session
-    /// History detail — the one section whose content is both very long and itself
-    /// scroll-based — pushed every sidebar row above the visible area, leaving the
-    /// navigation unreachable without switching to Compact. Swapping the sidebar's
-    /// `LazyVStack` for a plain `VStack` did not fix it and additionally broke the
-    /// detail column's scroll-to-top.
+    /// Two earlier `NavigationSplitView` attempts coupled the sidebar's viewport to the
+    /// selected detail page. On a tall Session History window, that pushed every row
+    /// above the visible area. `backgroundExtensionEffect()` also mirrored detail cards
+    /// and text into the navigation layer. This shell keeps both columns bounded by the
+    /// window, puts one system-supported regular glass effect around the navigation
+    /// surface, and extends only ProxyPilot's ambient background beneath it.
     ///
-    /// Anyone reattempting this: reproduce on a *tall* window (the owner runs ~1080x1920
-    /// portrait near-fullscreen) on Session History specifically. A short window hides
-    /// the bug completely.
+    /// Do not replace this with a split view or detail-derived background extension
+    /// without first reproducing at the owner's ~1080x1920 portrait near-fullscreen
+    /// Session History configuration; a short window hides the regression completely.
     private var splitSettingsBody: some View {
         HStack(spacing: 0) {
-            SettingsSidebarView(
-                selection: $selectedSection,
-                sections: SettingsSection.availableSidebarSections(
-                    repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
-                ),
-                versionText: appVersionText,
-                buildText: appBuildText
-            )
-            .frame(width: 238)
+            if !sidebarIsCollapsed {
+                GeometryReader { geometry in
+                    GlassNavigationSurface {
+                        VStack(spacing: 0) {
+                            Color.clear
+                                .frame(height: max(geometry.safeAreaInsets.top, 52), alignment: .bottom)
 
-            Divider()
+                            SettingsSidebarView(
+                                selection: $selectedSection,
+                                sections: SettingsSection.availableSidebarSections(
+                                    repoGPSRoutingEnabled: vm.repoGPSRoutingFeatureEnabled
+                                ),
+                                versionText: appVersionText,
+                                buildText: appBuildText,
+                                showsNewFeaturesPill: vm.harnessOnboardingBadgeVisible,
+                                onOpenNewFeatures: { vm.openHarnessOnboarding(surface: "sidebar_pill") }
+                            )
+                        }
+                    }
+                    .ignoresSafeArea(.container, edges: .top)
+                }
+                .frame(width: 238)
+                .transition(.move(edge: .leading).combined(with: .opacity))
+            }
 
             detailShell
                 .navigationTitle("")
@@ -185,6 +219,9 @@ struct ContentView: View {
                 }
         }
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.18), value: sidebarIsCollapsed)
+        .proxyPilotAmbientBackground()
+        .proxyPilotTransparentWindowToolbar()
     }
 
     private var usesNarrowStandaloneLayout: Bool {
@@ -216,6 +253,19 @@ struct ContentView: View {
                 .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .clipped()
                 .zIndex(0)
+
+            if usesCollapsedTopNavigation {
+                Divider()
+                AppVersionFooter(
+                    versionText: appVersionText,
+                    buildText: appBuildText,
+                    showsNewFeaturesPill: vm.harnessOnboardingBadgeVisible,
+                    onOpenNewFeatures: { vm.openHarnessOnboarding(surface: "compact_pill") }
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
         }
         .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .proxyPilotAmbientBackground()
@@ -328,6 +378,9 @@ struct ContentView: View {
                 onOpenAdvancedLogging: { selectedSection = .advanced }
             )
                 .environmentObject(vm)
+        case .harnesses:
+            CodingHarnessesView(onOpenHome: { selectedSection = .home })
+                .environmentObject(vm)
         case .proxy:
             proxyTab
         case .routing:
@@ -344,24 +397,51 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var settingsToolbar: some ToolbarContent {
-        if #available(macOS 26.0, *) {
-            ToolbarItem(placement: .navigation) {
-                ProxyPilotBrandMark()
+        if usesCollapsedTopNavigation {
+            if #available(macOS 26.0, *) {
+                ToolbarItem(placement: .navigation) {
+                    ProxyPilotBrandMark()
+                }
+                .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(placement: .navigation) {
+                    ProxyPilotBrandMark()
+                }
             }
-            .sharedBackgroundVisibility(.hidden)
-        } else {
-            ToolbarItem(placement: .navigation) {
-                ProxyPilotBrandMark()
-            }
-        }
 
-        if vm.shouldShowToolbarStatus {
-            ToolbarItem(placement: .navigation) {
-                StatusToolbarLabel(isRunning: vm.isRunning, statusText: vm.statusText)
+        } else {
+            if sidebarIsCollapsed {
+                ToolbarItem(placement: .navigation) {
+                    Button {
+                        toggleSidebar()
+                    } label: {
+                        Label("Show Sidebar", systemImage: "sidebar.left")
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("Show Sidebar")
+                }
+            } else {
+                if #available(macOS 26.0, *) {
+                    ToolbarItem(placement: .navigation) {
+                        SidebarToolbarBrandHeader(onToggleSidebar: toggleSidebar)
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .navigation) {
+                        SidebarToolbarBrandHeader(onToggleSidebar: toggleSidebar)
+                    }
+                }
             }
         }
 
         ToolbarItemGroup(placement: .primaryAction) {
+            if vm.shouldShowToolbarStatus {
+                StatusToolbarLabel(
+                    status: vm.toolbarProxyStatus,
+                    usesCompactText: !usesNarrowStandaloneLayout
+                )
+            }
+
             Button {
                 Task { await vm.startProxy() }
             } label: {
@@ -453,6 +533,10 @@ struct ContentView: View {
 
     private var appBuildText: String {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+    }
+
+    private func toggleSidebar() {
+        sidebarIsCollapsed.toggle()
     }
 
     private var promptCachingModeColor: Color {
@@ -2036,7 +2120,7 @@ struct ContentView: View {
 
                 Toggle("Share anonymous diagnostics telemetry", isOn: Binding(
                     get: { vm.telemetryOptIn },
-                    set: { vm.telemetryOptIn = $0 }
+                    set: { vm.setTelemetryOptIn($0, surface: "advanced_settings") }
                 ))
                 .toggleStyle(.switch)
                 .help("Optional analytics are off by default. Minimal app-open and version health reporting stays on.")
@@ -2557,28 +2641,70 @@ private struct ProxyFocusGlowModifier: ViewModifier {
     }
 }
 
+private struct SidebarToolbarBrandHeader: View {
+    let onToggleSidebar: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProxyPilotBrandMark()
+            Spacer(minLength: 0)
+
+            Button(action: onToggleSidebar) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 26, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .background(.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .help("Hide Sidebar")
+            .accessibilityLabel("Hide Sidebar")
+        }
+        // The sidebar's own GlassNavigationSurface already extends through the
+        // titlebar. Keep this as content only: a second finite glass surface
+        // creates a visible bottom halo where the two layers overlap.
+        .frame(width: 135)
+    }
+}
+
 private struct StatusToolbarLabel: View {
-    let isRunning: Bool
-    let statusText: String
+    let status: AppViewModel.ToolbarProxyStatus
+    let usesCompactText: Bool
+
+    private var tint: Color {
+        switch status.kind {
+        case .gui:
+            return .green
+        case .cli:
+            return .blue
+        case .repoGPS:
+            return .cyan
+        case .issue:
+            return .orange
+        case .stopped:
+            return .secondary
+        }
+    }
 
     var body: some View {
         HStack(spacing: 6) {
             Circle()
-                .fill(isRunning ? Color.green : Color.secondary)
+                .fill(tint)
                 .frame(width: 7, height: 7)
 
-            Text(statusText)
+            Text(usesCompactText ? status.compactText : status.fullText)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
         .font(.caption.weight(.medium))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .frame(minWidth: 92, maxWidth: 190, alignment: .leading)
+        .padding(.horizontal, usesCompactText ? 7 : 10)
+        .padding(.vertical, 4)
+        .frame(maxWidth: 190, alignment: .leading)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Proxy status \(statusText)")
-        .help("Proxy status: \(statusText)")
+        .accessibilityLabel("Proxy status \(status.fullText)")
+        .help("Proxy status: \(status.fullText)")
     }
 }
 
@@ -2666,7 +2792,7 @@ private struct AnalyticsOptInView: View {
             Text("Please consider sharing basic, anonymous analytics.")
                 .font(.title3.bold())
 
-            Text("ProxyPilot uses anonymous analytics to spot crashes and confirm that updates work. By default, it only reports app opens and app version; opting in also includes successful proxy engagement and crash reporting. Prompts, endpoint IDs, and system info are never collected, and you can change this any time in Advanced settings.")
+            Text("By default, ProxyPilot reports only app-open, version, and build health. If you enable optional analytics, it also shares which providers and client surfaces are used; bucketed request, token, latency, streaming, and cache summaries; feature modes; setup progress; and normalized failures. Prompts, completions, API keys, URLs, raw errors, repository names, device identifiers, and specific model names are never sent. You can change this any time in Advanced settings.")
                 .foregroundStyle(.secondary)
 
             HStack {
@@ -2699,7 +2825,7 @@ private struct OnboardingWizardView: View {
 
             Toggle("Share anonymous diagnostics telemetry (optional)", isOn: Binding(
                 get: { vm.telemetryOptIn },
-                set: { vm.telemetryOptIn = $0 }
+                set: { vm.setTelemetryOptIn($0, surface: "onboarding") }
             ))
             .toggleStyle(.switch)
 

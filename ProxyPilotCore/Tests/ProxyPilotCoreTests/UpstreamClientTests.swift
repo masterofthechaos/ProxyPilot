@@ -36,6 +36,7 @@ final class UpstreamClientTests: XCTestCase {
                 ("Authorization", "Bearer local-master-key"),
                 ("X-Api-Key", "local-master-key"),
                 ("Api-Key", "local-master-key"),
+                (TutorRequestAdapter.headerName, "local-tutor-envelope"),
                 ("Content-Type", "application/json")
             ],
             body: Data(#"{"model":"allowed-model"}"#.utf8),
@@ -45,6 +46,7 @@ final class UpstreamClientTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer upstream-key")
         XCTAssertNil(request.value(forHTTPHeaderField: "X-Api-Key"))
         XCTAssertNil(request.value(forHTTPHeaderField: "Api-Key"))
+        XCTAssertNil(request.value(forHTTPHeaderField: TutorRequestAdapter.headerName))
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
     }
 }

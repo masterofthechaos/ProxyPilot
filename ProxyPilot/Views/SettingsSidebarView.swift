@@ -31,12 +31,74 @@ enum AppBuildBadge {
     }
 }
 
+enum AppVersionDisplay {
+    static func text(version: String, build: String) -> String {
+        "v\(version) (\(build))"
+    }
+}
+
+struct AppVersionFooter: View {
+    let versionText: String
+    let buildText: String
+    /// Shown until the harness tour is completed. Defaulted so non-onboarding call
+    /// sites (and previews) keep compiling unchanged.
+    var showsNewFeaturesPill: Bool = false
+    var onOpenNewFeatures: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Text(AppVersionDisplay.text(version: versionText, build: buildText))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+
+                if let badge = AppBuildBadge.current {
+                    Text(badge.text)
+                        .font(.caption2.weight(.semibold))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(badge.tint.opacity(0.15), in: Capsule())
+                        .foregroundStyle(badge.tint)
+                }
+            }
+            // The version line owns its own label so an interactive pill beside it
+            // stays reachable; a label on the whole footer would swallow the button.
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("ProxyPilot version \(versionText), build \(buildText)")
+
+            Link(destination: SlicewriteStudioBrand.websiteURL) {
+                HStack(spacing: 0) {
+                    Text(SlicewriteStudioBrand.attributionLeadIn)
+                        .foregroundStyle(.tertiary)
+
+                    Text(SlicewriteStudioBrand.name)
+                        .fontWeight(.bold)
+                        .foregroundStyle(.secondary)
+                        .underline()
+                }
+                .font(.caption2)
+            }
+            .buttonStyle(.plain)
+            .help("Visit Slicewrite Studio")
+            .accessibilityLabel(SlicewriteStudioBrand.attributionText)
+            .accessibilityHint("Opens slicewrite.com in your default browser")
+
+            if showsNewFeaturesPill, let onOpenNewFeatures {
+                NewFeaturesPill(action: onOpenNewFeatures)
+                    .transition(.opacity.combined(with: .scale(scale: 0.92, anchor: .leading)))
+            }
+        }
+    }
+}
+
 struct SettingsSidebarView: View {
     @Binding var selection: SettingsSection
 
     let sections: [SettingsSection]
     let versionText: String
     let buildText: String
+    var showsNewFeaturesPill: Bool = false
+    var onOpenNewFeatures: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -61,22 +123,12 @@ struct SettingsSidebarView: View {
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text("v\(versionText) (\(buildText))")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-
-                    if let badge = AppBuildBadge.current {
-                        Text(badge.text)
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(badge.tint.opacity(0.15), in: Capsule())
-                            .foregroundStyle(badge.tint)
-                    }
-                }
-            }
+            AppVersionFooter(
+                versionText: versionText,
+                buildText: buildText,
+                showsNewFeaturesPill: showsNewFeaturesPill,
+                onOpenNewFeatures: onOpenNewFeatures
+            )
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
             .padding(.vertical, 10)

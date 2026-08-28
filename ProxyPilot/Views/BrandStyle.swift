@@ -1,6 +1,13 @@
 import AppKit
 import SwiftUI
 
+enum SlicewriteStudioBrand {
+    static let name = "Slicewrite Studio"
+    static let attributionLeadIn = "a developer tool by "
+    static let attributionText = attributionLeadIn + name
+    static let websiteURL = URL(string: "https://slicewrite.com/")!
+}
+
 /// Hues sampled directly from the app icon's circuit trail (pink -> violet -> blue-violet).
 /// Distinct from `vm.proxyPilotAccentColor`, which is user-customizable; these stay fixed
 /// as the app's brand identity.
@@ -20,11 +27,13 @@ struct ProxyPilotBrandMark: View {
                 .interpolation(.high)
                 .frame(width: 18, height: 18)
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                .shadow(color: ProxyPilotBrandPalette.violet.opacity(0.35), radius: 4, y: 1)
+                .shadow(color: ProxyPilotBrandPalette.violet.opacity(0.22), radius: 3, y: 1)
 
             Text(AppBuildBadge.currentAppDisplayName)
-                .font(.system(size: 13, weight: .bold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.trailing, 4)
         .accessibilityElement(children: .combine)
@@ -80,5 +89,14 @@ private struct ProxyPilotAmbientBackground: ViewModifier {
 extension View {
     func proxyPilotAmbientBackground() -> some View {
         modifier(ProxyPilotAmbientBackground())
+    }
+
+    @ViewBuilder
+    func proxyPilotTransparentWindowToolbar() -> some View {
+        if #available(macOS 26.0, *) {
+            toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
+        } else {
+            self
+        }
     }
 }

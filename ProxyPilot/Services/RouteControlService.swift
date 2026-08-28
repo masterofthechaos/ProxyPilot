@@ -80,15 +80,30 @@ final class RouteControlService: ObservableObject {
     @Published private(set) var isApplying = false
     @Published private(set) var lastError: String?
 
+    private let home: URL
+    private let applicationBundleURL: URL
+
+    init(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        bundle: Bundle = .main
+    ) {
+        self.home = home
+        self.applicationBundleURL = bundle.bundleURL
+    }
+
     /// Candidates in resolution order. The shared runtime symlink wins because
     /// `runtime activate` keeps it pointing at the newest compatible build.
     nonisolated static func candidateBinaries(
-        home: URL = FileManager.default.homeDirectoryForCurrentUser
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        applicationBundleURL: URL = Bundle.main.bundleURL
     ) -> [URL] {
-        [
+        let candidates = [
             home.appendingPathComponent(".proxypilot/bin/proxypilot"),
+            applicationBundleURL.appendingPathComponent("Contents/Helpers/proxypilot"),
             URL(fileURLWithPath: "/Applications/ProxyPilot.app/Contents/Helpers/proxypilot")
         ]
+        var seen = Set<String>()
+        return candidates.filter { seen.insert($0.standardizedFileURL.path).inserted }
     }
 
     // MARK: - Pure parsing (unit-tested without a binary present)
@@ -135,8 +150,14 @@ final class RouteControlService: ObservableObject {
         return (data, process.terminationStatus)
     }
 
-    private nonisolated static func resolveAvailability() -> Availability {
-        for candidate in candidateBinaries() where FileManager.default.isExecutableFile(atPath: candidate.path) {
+    private nonisolated static func resolveAvailability(
+        home: URL,
+        applicationBundleURL: URL
+    ) -> Availability {
+        for candidate in candidateBinaries(
+            home: home,
+            applicationBundleURL: applicationBundleURL
+        ) where FileManager.default.isExecutableFile(atPath: candidate.path) {
             guard let (data, code) = run(candidate, ["capabilities", "--json"]), code == 0 else {
                 return .tooOld(candidate)
             }
@@ -150,8 +171,13 @@ final class RouteControlService: ObservableObject {
     /// Re-resolves the CLI and reloads route state. Cheap enough to call on
     /// appear and after any mutation.
     func refresh() async {
+        let home = home
+        let applicationBundleURL = applicationBundleURL
         let resolved = await Task.detached(priority: .userInitiated) {
-            Self.resolveAvailability()
+            Self.resolveAvailability(
+                home: home,
+                applicationBundleURL: applicationBundleURL
+            )
         }.value
         availability = resolved
 

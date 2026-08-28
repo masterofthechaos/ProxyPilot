@@ -35,6 +35,15 @@ struct RouteStatusCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(commandName: "status")
     @Flag(name: .long) var json = false
     func run() async throws {
+        try await RouteStatusReporter.run(json: json)
+    }
+}
+
+/// Emits route status without constructing an ArgumentParser command by hand.
+/// Property-wrapper-backed commands are valid only after ArgumentParser parses
+/// them; direct initialization traps as soon as a wrapped property is read.
+enum RouteStatusReporter {
+    static func run(json: Bool) async throws {
         let selected = RouteState.load(); let selectedPort = selected?.port ?? 4000; let probe = await CLIProxyRuntime.probeProxy(on: selectedPort); let pid = PidFile.read()
         let applied = if let selected { await RouteReadiness.selected(port: selected.port, model: selected.model) } else { false }
         let verificationState = applied ? "models_ready" : (probe.reachable ? "mismatched" : "stopped")
@@ -61,23 +70,27 @@ struct RouteSetCommand: AsyncParsableCommand {
     @Option(name: .long) var port: UInt16 = 4000
     @Flag(name: .long) var json = false
     func run() async throws {
-        try FileManager.default.createDirectory(at: RouteState.directory, withIntermediateDirectories: true)
-        let fd = open(RouteState.lock.path, O_CREAT | O_RDWR, 0o600); guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw ValidationError("Another route switch is in progress") }; defer { flock(fd, LOCK_UN); close(fd) }
-        let previous = RouteState.load()
-        if let pid = PidFile.read() {
-            guard kill(pid, SIGTERM) == 0 else { throw ValidationError("Could not stop CLI-owned route") }
-            for _ in 0..<100 { if !PidFile.isProcessRunning(pid: pid), await RouteReadiness.models(port: port) == nil { break }; try? await Task.sleep(for: .milliseconds(100)) }
-            if await RouteReadiness.models(port: port) != nil {
-                guard kill(pid, SIGKILL) == 0 else { throw ValidationError("Previous CLI-owned route did not release port \(port), and force-stop failed") }
-                for _ in 0..<50 { if await RouteReadiness.models(port: port) == nil { break }; try? await Task.sleep(for: .milliseconds(100)) }
+        do {
+            try await RouteState.withExclusiveLock {
+                let previous = RouteState.load()
+                if let pid = PidFile.read() {
+                    guard kill(pid, SIGTERM) == 0 else { throw ValidationError("Could not stop CLI-owned route") }
+                    for _ in 0..<100 { if !PidFile.isProcessRunning(pid: pid), await RouteReadiness.models(port: port) == nil { break }; try? await Task.sleep(for: .milliseconds(100)) }
+                    if await RouteReadiness.models(port: port) != nil {
+                        guard kill(pid, SIGKILL) == 0 else { throw ValidationError("Previous CLI-owned route did not release port \(port), and force-stop failed") }
+                        for _ in 0..<50 { if await RouteReadiness.models(port: port) == nil { break }; try? await Task.sleep(for: .milliseconds(100)) }
+                    }
+                    PidFile.remove()
+                    guard await RouteReadiness.models(port: port) == nil else { throw ValidationError("Previous CLI-owned route did not release port \(port)") }
+                }
+                else if (await CLIProxyRuntime.probeProxy(on: port)).reachable { throw ValidationError("Port \(port) is owned by the GUI or an unmanaged listener; refusing to stop it") }
+                do { try await start(provider: provider, model: model, port: port); try RouteState.save(.init(provider: provider, model: model, port: port, updatedAt: Date())) }
+                catch { if let previous { try? await start(provider: previous.provider, model: previous.model, port: previous.port) }; throw error }
             }
-            PidFile.remove()
-            guard await RouteReadiness.models(port: port) == nil else { throw ValidationError("Previous CLI-owned route did not release port \(port)") }
+        } catch is RouteLockUnavailable {
+            throw ValidationError("Another route switch is in progress")
         }
-        else if (await CLIProxyRuntime.probeProxy(on: port)).reachable { throw ValidationError("Port \(port) is owned by the GUI or an unmanaged listener; refusing to stop it") }
-        do { try await start(provider: provider, model: model, port: port); try RouteState.save(.init(provider: provider, model: model, port: port, updatedAt: Date())) }
-        catch { if let previous { try? await start(provider: previous.provider, model: previous.model, port: previous.port) }; throw error }
-        try await RouteStatusCommand(json: json).run()
+        try await RouteStatusReporter.run(json: json)
     }
     private func start(provider: String, model: String, port: UInt16) async throws {
         let process = Process(); process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]); process.arguments = ["start", "--provider", provider, "--model", model, "--port", String(port), "--daemon", "--json"]
@@ -101,7 +114,7 @@ struct RouteEnsureCommand: AsyncParsableCommand {
             // directly and predates the --json flag being honored, so switching
             // this to human output on a bare invocation would break it. Revisit
             // once the RepoGPS side is known to pass --json.
-            try await RouteStatusCommand(json: true).run()
+            try await RouteStatusReporter.run(json: true)
         }
     }
 }

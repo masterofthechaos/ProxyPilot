@@ -327,7 +327,7 @@ enum MCPServerSetup {
                         "provider": stringProp("Cloud provider to store auth for"),
                         "key": stringProp("API key value to store"),
                         "allow_secret_write": boolProp("Must be true to store the key in the user's secrets store"),
-                    ]),
+                    ], required: ["provider", "key", "allow_secret_write"]),
                     annotations: .init(
                         readOnlyHint: false,
                         destructiveHint: false,
@@ -356,7 +356,7 @@ enum MCPServerSetup {
                     inputSchema: jsonSchemaObject(properties: [
                         "port": intProp("ProxyPilot port to point Xcode at (default 4000, range 1024-65535)"),
                         "allow_xcode_config_write": boolProp("Must be true after the user explicitly consents to this persistent Xcode routing change"),
-                    ]),
+                    ], required: ["allow_xcode_config_write"]),
                     annotations: .init(
                         readOnlyHint: false,
                         destructiveHint: false,
@@ -370,7 +370,7 @@ enum MCPServerSetup {
                     description: "Remove Xcode Agent Mode configuration, restoring Xcode to use Anthropic's servers directly. Disabled unless MCP was launched with PROXYPILOT_MCP_ALLOW_XCODE_CONFIG=1 and this call includes allow_xcode_config_write: true after explicit user confirmation.",
                     inputSchema: jsonSchemaObject(properties: [
                         "allow_xcode_config_write": boolProp("Must be true after the user explicitly consents to this persistent Xcode routing change"),
-                    ]),
+                    ], required: ["allow_xcode_config_write"]),
                     annotations: .init(
                         readOnlyHint: false,
                         destructiveHint: true,
@@ -399,7 +399,7 @@ enum MCPServerSetup {
                 Tool(
                     name: "get_session_stats",
                     title: "Get Session Statistics",
-                    description: "Get request count, token usage, model distribution, and average latency for the current proxy session.",
+                    description: "Get request count, token usage, model distribution, and average latency. When the harness exports a client session, this reports that session's usage aggregated from the durable session report; otherwise it reports only a proxy running inside this MCP process. The payload names its own scope.",
                     inputSchema: emptySchema,
                     annotations: .init(
                         readOnlyHint: true,
@@ -427,7 +427,7 @@ enum MCPServerSetup {
                 Tool(
                     name: "proxy_logs",
                     title: "Read Proxy Logs",
-                    description: "Read recent proxy log lines with secrets redacted.",
+                    description: "Read recent lines from the GUI built-in proxy log with secrets redacted. This file is shared and never scoped to a session, so it may contain stale or unrelated entries; do not infer the active route or model from it. Use get_session_stats for attributed usage.",
                     inputSchema: jsonSchemaObject(properties: [
                         "lines": intProp("Number of lines to return (default 75, range 1-1000)"),
                     ]),
@@ -1221,16 +1221,70 @@ enum MCPServerSetup {
 
             case "get_session_stats":
                 let snapshot = await state.sessionStats.snapshot()
+
+                // `state.sessionStats` only counts traffic served by a proxy running inside this
+                // process. Whenever the proxy is a daemon or the GUI — the usual case — it stays
+                // at zero. When the harness tells us which session we serve, aggregate the shared
+                // session report instead, which every proxy writes to regardless of owner.
+                if let attribution = ClientSessionEnvironment.attribution() {
+                    let events = (try? SessionReportStore.readEvents()) ?? []
+                    let telemetry = AttributedSessionTelemetry.aggregate(events: events, matching: attribution)
+                    let dist = telemetry.models.map { "\($0.key): \($0.value)" }.sorted().joined(separator: ", ")
+                    let latency = telemetry.averageLatencyMs.map { "\($0)ms" } ?? "n/a"
+                    let text = """
+                    Session Stats (\(attribution.client) session \(attribution.sessionID)):
+                      Requests: \(telemetry.requests)
+                      Tokens: \(telemetry.totalTokens) (prompt: \(telemetry.promptTokens), completion: \(telemetry.completionTokens))
+                      Avg Latency: \(latency)
+                      Models: \(dist.isEmpty ? "none" : dist)
+                    """
+                    return toolSuccess(
+                        tool: "get_session_stats",
+                        data: SessionStatsToolPayload(
+                            requests: telemetry.requests,
+                            totalTokens: telemetry.totalTokens,
+                            promptTokens: telemetry.promptTokens,
+                            completionTokens: telemetry.completionTokens,
+                            averageLatencyMs: telemetry.averageLatencyMs,
+                            uptimeSeconds: snapshot.uptimeSeconds,
+                            models: telemetry.models,
+                            promptCacheHitTokens: telemetry.promptCacheHitTokens,
+                            promptCacheMissTokens: telemetry.promptCacheMissTokens,
+                            promptCacheWriteTokens: telemetry.promptCacheWriteTokens,
+                            cacheHitRate: telemetry.cacheHitRate,
+                            cacheAccountingAvailable: telemetry.cacheAccountingAvailable,
+                            scope: .attributedSession,
+                            attributed: true,
+                            sessionID: attribution.sessionID,
+                            source: attribution.client,
+                            firstRequestAt: telemetry.firstRequestAt,
+                            lastRequestAt: telemetry.lastRequestAt
+                        ),
+                        text: text
+                    )
+                }
+
                 let dist = snapshot.modelDistribution.map { "\($0.key): \($0.value)" }.sorted().joined(separator: ", ")
                 let latency = snapshot.avgLatencyMs.map { "\($0)ms" } ?? "n/a"
                 let text = """
-                Session Stats:
+                Session Stats (proxy running in this MCP process only):
                   Requests: \(snapshot.totalRequests)
                   Tokens: \(snapshot.totalTokens) (prompt: \(snapshot.totalPromptTokens), completion: \(snapshot.totalCompletionTokens))
                   Avg Latency: \(latency)
                   Uptime: \(snapshot.uptimeSeconds)s
                   Models: \(dist.isEmpty ? "none" : dist)
                 """
+                // Zero here means "nothing was served by this process", which is not the same as
+                // "no traffic". Point the caller at the tool that can tell the difference.
+                let unattributedNextActions: [NextAction] = snapshot.totalRequests == 0
+                    ? [NextAction(
+                        id: "list_recorded_sessions",
+                        kind: .mcpTool,
+                        tool: "get_session_history",
+                        message: "This process serves no proxy, so these counters stay at zero. Use get_session_history to see recorded sessions and their real usage.",
+                        destructive: false
+                      )]
+                    : []
                 return toolSuccess(
                     tool: "get_session_stats",
                     data: SessionStatsToolPayload(
@@ -1245,9 +1299,16 @@ enum MCPServerSetup {
                         promptCacheMissTokens: snapshot.totalPromptCacheMissTokens,
                         promptCacheWriteTokens: snapshot.totalPromptCacheWriteTokens,
                         cacheHitRate: snapshot.cacheHitRate,
-                        cacheAccountingAvailable: snapshot.cacheAccountingAvailable
+                        cacheAccountingAvailable: snapshot.cacheAccountingAvailable,
+                        scope: .inProcessProxy,
+                        attributed: false,
+                        sessionID: nil,
+                        source: nil,
+                        firstRequestAt: nil,
+                        lastRequestAt: nil
                     ),
-                    text: text
+                    text: text,
+                    nextActions: unattributedNextActions
                 )
 
             case "get_session_history":
@@ -1337,11 +1398,66 @@ enum MCPServerSetup {
                     }
                     return toolError(tool: "proxy_logs", code: "E036", message: "Invalid lines argument.")
                 }
-                let logLines = LogReader.tail(url: LogReader.defaultLogURL, lines: lineCount, redact: true)
-                if logLines.isEmpty {
-                    return .init(content: [.text(text: "No log output yet. Start the proxy first.", annotations: nil, _meta: nil)])
+                let logURL = LogReader.defaultLogURL
+                let logLines = LogReader.tail(url: logURL, lines: lineCount, redact: true)
+
+                // This file is written only by the GUI's built-in proxy, and it is never rotated
+                // per session — a CLI daemon or a test run leaves lines here that belong to
+                // neither the caller nor the present moment. Ship provenance with the lines so a
+                // reader cannot mistake someone else's stale entries for its own live route.
+                let lastModified = try? logURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+                let ageSeconds = lastModified.map { Int(Date().timeIntervalSince($0)) }
+                let attribution = ClientSessionEnvironment.attribution()
+
+                var provenance = "Source: \(logURL.path) (written by the GUI built-in proxy only)."
+                if let ageSeconds {
+                    provenance += " Last written \(ageSeconds)s ago."
                 }
-                return .init(content: [.text(text: logLines.joined(separator: "\n"), annotations: nil, _meta: nil)])
+                if let attribution {
+                    provenance += " These lines are NOT scoped to \(attribution.client) session \(attribution.sessionID);"
+                        + " use get_session_stats for this session's actual usage."
+                }
+
+                var nextActions: [NextAction] = []
+                if attribution != nil {
+                    nextActions.append(NextAction(
+                        id: "attributed_session_stats",
+                        kind: .mcpTool,
+                        tool: "get_session_stats",
+                        message: "Report this session's real model usage instead of inferring it from shared log lines.",
+                        destructive: false
+                    ))
+                }
+
+                if logLines.isEmpty {
+                    return toolSuccess(
+                        tool: "proxy_logs",
+                        data: ProxyLogsToolPayload(
+                            lines: [],
+                            path: logURL.path,
+                            lastModified: lastModified,
+                            ageSeconds: ageSeconds,
+                            writtenBy: "gui_builtin_proxy",
+                            coversCurrentSession: false
+                        ),
+                        text: "No log output from the GUI built-in proxy. \(provenance)",
+                        nextActions: nextActions
+                    )
+                }
+
+                return toolSuccess(
+                    tool: "proxy_logs",
+                    data: ProxyLogsToolPayload(
+                        lines: logLines,
+                        path: logURL.path,
+                        lastModified: lastModified,
+                        ageSeconds: ageSeconds,
+                        writtenBy: "gui_builtin_proxy",
+                        coversCurrentSession: false
+                    ),
+                    text: provenance + "\n\n" + logLines.joined(separator: "\n"),
+                    nextActions: nextActions
+                )
 
             default:
                 return .init(content: [.text(text: "Unknown tool: \(params.name)", annotations: nil, _meta: nil)], isError: true)

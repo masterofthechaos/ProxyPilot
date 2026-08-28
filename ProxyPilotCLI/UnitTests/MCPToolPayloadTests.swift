@@ -5,6 +5,8 @@ import Testing
 
 struct MCPToolPayloadTests {
     @Test func sessionStatsPayloadEncodesStructuredFieldsForAgents() throws {
+        let firstRequest = Date(timeIntervalSince1970: 1_756_200_000)
+        let lastRequest = Date(timeIntervalSince1970: 1_756_200_600)
         let payload = SessionStatsToolPayload(
             requests: 2,
             totalTokens: 30,
@@ -17,7 +19,13 @@ struct MCPToolPayloadTests {
             promptCacheMissTokens: 6,
             promptCacheWriteTokens: 3,
             cacheHitRate: 0.4,
-            cacheAccountingAvailable: true
+            cacheAccountingAvailable: true,
+            scope: .attributedSession,
+            attributed: true,
+            sessionID: "082bd58f-1c3d-4a2b-9f10-6d5e4c3b2a19",
+            source: "repogps",
+            firstRequestAt: firstRequest,
+            lastRequestAt: lastRequest
         )
 
         let json = try AgentJSON.encode(payload)
@@ -36,6 +44,55 @@ struct MCPToolPayloadTests {
         #expect(object["prompt_cache_write_tokens"] as? Int == 3)
         #expect(object["cache_hit_rate"] as? Double == 0.4)
         #expect(object["cache_accounting_available"] as? Bool == true)
+
+        // The attribution fields are the point of the payload: without them an agent cannot
+        // tell "this session sent nothing" from "this process is not the one serving traffic".
+        #expect(object["scope"] as? String == "attributed_session")
+        #expect(object["attributed"] as? Bool == true)
+        #expect(object["session_id"] as? String == "082bd58f-1c3d-4a2b-9f10-6d5e4c3b2a19")
+        #expect(object["source"] as? String == "repogps")
+
+        let iso = ISO8601DateFormatter()
+        #expect(object["first_request_at"] as? String == iso.string(from: firstRequest))
+        #expect(object["last_request_at"] as? String == iso.string(from: lastRequest))
+    }
+
+    @Test func sessionStatsPayloadLabelsUnattributedInProcessZeros() throws {
+        // The regression this guards: a caller with no harness session gets real zeros from an
+        // in-process proxy that never served anything. They must arrive labelled, and the
+        // optional attribution fields must be absent rather than empty-but-present.
+        let payload = SessionStatsToolPayload(
+            requests: 0,
+            totalTokens: 0,
+            promptTokens: 0,
+            completionTokens: 0,
+            averageLatencyMs: nil,
+            uptimeSeconds: 12,
+            models: [:],
+            promptCacheHitTokens: 0,
+            promptCacheMissTokens: 0,
+            promptCacheWriteTokens: 0,
+            cacheHitRate: nil,
+            cacheAccountingAvailable: false,
+            scope: .inProcessProxy,
+            attributed: false,
+            sessionID: nil,
+            source: nil,
+            firstRequestAt: nil,
+            lastRequestAt: nil
+        )
+
+        let json = try AgentJSON.encode(payload)
+        let data = Data(json.utf8)
+        let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        #expect(object["requests"] as? Int == 0)
+        #expect(object["scope"] as? String == "in_process_proxy")
+        #expect(object["attributed"] as? Bool == false)
+        #expect(object["session_id"] == nil)
+        #expect(object["source"] == nil)
+        #expect(object["first_request_at"] == nil)
+        #expect(object["last_request_at"] == nil)
     }
 
     @Test func proxyStopPlanDoesNotSuggestConfigRemovalWhenConfigIsNotInstalled() {

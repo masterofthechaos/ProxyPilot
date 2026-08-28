@@ -103,6 +103,10 @@ struct ProxyPilotApp: App {
                 Button("ProxyPilot Website") {
                     viewModel.openWebsite()
                 }
+                Divider()
+                Button("Slicewrite Studio") {
+                    NSWorkspace.shared.open(SlicewriteStudioBrand.websiteURL)
+                }
             }
         }
 

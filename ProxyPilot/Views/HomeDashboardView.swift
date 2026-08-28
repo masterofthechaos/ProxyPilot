@@ -18,11 +18,15 @@ struct HomeDashboardView: View {
     @State private var sessionCSVExportStatus: String = ""
     @State private var expandedSessionRequestIDs: Set<UUID> = []
     @State private var copiedSessionRequestID: UUID?
+    @State private var showResetSessionConfirmation = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if visibleHomeSections.isEmpty {
+                if vm.repoGPS.session.lease != nil {
+                    repoGPSCockpit
+                }
+                if visibleHomeSections.isEmpty && vm.repoGPS.session.lease == nil {
                     hiddenHomeSectionsPlaceholder
                 } else {
                     if vm.isHomeDashboardSectionVisible(.sessionSummary) {
@@ -42,10 +46,128 @@ struct HomeDashboardView: View {
             .padding(24)
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .topLeading)
         }
+        .alert("Reset current session metrics?", isPresented: $showResetSessionConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Reset Metrics", role: .destructive) {
+                resetCurrentSessionMetrics()
+            }
+        } message: {
+            Text("This clears the current dashboard metrics and temporarily excludes already imported CLI session records until ProxyPilot relaunches. Source logs and Session History are not deleted.")
+        }
     }
 
     private var visibleHomeSections: Set<HomeDashboardSection> {
         vm.visibleHomeDashboardSections
+    }
+
+    private var repoGPSCockpit: some View {
+        DashboardCard {
+            VStack(alignment: .leading, spacing: 14) {
+                ViewThatFits {
+                    HStack(alignment: .top, spacing: 12) {
+                        repoGPSCockpitTitle
+                        Spacer()
+                        repoGPSActivityBadge
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        repoGPSCockpitTitle
+                        repoGPSActivityBadge
+                    }
+                }
+
+                ViewThatFits {
+                    HStack(spacing: 12) {
+                        repoGPSMetric("Mode", vm.repoGPS.session.lease?.mode.capitalized ?? "Normal")
+                        repoGPSMetric("Requests", "\(vm.sessionReportCard.totalRequests)")
+                        repoGPSMetric("Pending Signals", "\(vm.repoGPS.session.pendingSignals)")
+                        repoGPSMetric("Route", vm.routeControl.status.model ?? "Checking")
+                    }
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 12)], spacing: 12) {
+                        repoGPSMetric("Mode", vm.repoGPS.session.lease?.mode.capitalized ?? "Normal")
+                        repoGPSMetric("Requests", "\(vm.sessionReportCard.totalRequests)")
+                        repoGPSMetric("Pending Signals", "\(vm.repoGPS.session.pendingSignals)")
+                        repoGPSMetric("Route", vm.routeControl.status.model ?? "Checking")
+                    }
+                }
+
+                if vm.repoGPS.session.active {
+                    ViewThatFits {
+                        HStack(spacing: 8) {
+                            repoGPSControlButtons
+                            Spacer()
+                            repoGPSControlExplanation
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            ViewThatFits {
+                                HStack(spacing: 8) { repoGPSControlButtons }
+                                VStack(alignment: .leading, spacing: 8) { repoGPSControlButtons }
+                            }
+                            repoGPSControlExplanation
+                        }
+                    }
+                } else {
+                    Text("The terminal session has ended. Its ProxyPilot CLI route is still available for the next RepoGPS flight.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.cyan.opacity(0.35), lineWidth: 1)
+        }
+    }
+
+    private var repoGPSCockpitTitle: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label(
+                vm.repoGPS.session.active ? "RepoGPS In Flight" : "RepoGPS Last Flight",
+                systemImage: vm.repoGPS.session.active ? "location.north.circle.fill" : "location.north.circle"
+            )
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(.cyan)
+            Text(vm.repoGPS.session.lease?.repository ?? "Active terminal session")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+    }
+
+    private var repoGPSActivityBadge: some View {
+        statusBadge(
+            title: vm.repoGPS.session.active
+                ? (vm.repoGPS.session.lease?.activity ?? "active").replacingOccurrences(of: "_", with: " ").capitalized
+                : "Landed",
+            systemImage: vm.repoGPS.session.active ? "waveform.path.ecg" : "checkmark.circle",
+            color: .cyan
+        )
+    }
+
+    @ViewBuilder
+    private var repoGPSControlButtons: some View {
+        Button("Retrace") { Task { await vm.repoGPS.signal("retrace") } }
+        Button("Write Waypoint") { Task { await vm.repoGPS.signal("waypoint") } }
+        Button("Prepare Landing") { Task { await vm.repoGPS.signal("prepare-landing") } }
+    }
+
+    private var repoGPSControlExplanation: some View {
+        Text("Controls are delivered to the RepoGPS TUI when it is ready.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func repoGPSMetric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title.uppercased()).font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+            Text(value).font(.callout.weight(.medium)).lineLimit(1)
+        }
+        .padding(10)
+        .frame(minWidth: 120, maxWidth: .infinity, alignment: .leading)
+        .background(Color.cyan.opacity(0.07), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var heroCard: some View {
@@ -176,8 +298,8 @@ struct HomeDashboardView: View {
         ViewThatFits {
             HStack(spacing: 12) {
                 proxyActionGroup
-                Spacer()
                 workflowUtilityGroup
+                Spacer(minLength: 0)
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -268,7 +390,7 @@ struct HomeDashboardView: View {
                 // Same proxy-side route state the Claude Agent card shows — both modes
                 // are remapped by the same running proxy, so this is not mode-specific.
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Applied: \(vm.xcodeAgentAppliedModelText)")
+                    Text("Xcode route: \(vm.xcodeAgentAppliedModelText)")
                     Text("Live: \(vm.xcodeAgentLiveRouteText)")
                 }
                 .font(.caption2)
@@ -282,12 +404,7 @@ struct HomeDashboardView: View {
                     .buttonStyle(.bordered)
                     .accessibilityHint("Opens the exact Xcode agent registration values in Proxy settings.")
                 } else {
-                    Button { onOpenProxy() } label: {
-                        Text("Full setup and verification in **Proxy**.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
+                    proxySetupButton
                 }
             }
         }
@@ -360,21 +477,25 @@ struct HomeDashboardView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Applied: \(vm.xcodeAgentAppliedModelText)")
+                    Text("Xcode route: \(vm.xcodeAgentAppliedModelText)")
                     Text("Live: \(vm.xcodeAgentLiveRouteText)")
                 }
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
 
-                Button { onOpenProxy() } label: {
-                    Text("Full setup and verification in **Proxy**.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
+                proxySetupButton
             }
         }
+    }
+
+    private var proxySetupButton: some View {
+        Button(action: onOpenProxy) {
+            Label("Open Proxy Setup", systemImage: "arrow.right.circle")
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityHint("Opens complete Xcode routing setup and verification in Proxy settings.")
     }
 
     private var agentConfigInstallStatusText: some View {
@@ -544,14 +665,18 @@ struct HomeDashboardView: View {
             Button("View History") {
                 onOpenSessionHistory()
             }
-            Button("Reset") {
-                vm.resetSessionStats()
-                sessionCSVExportStatus = ""
-                expandedSessionRequestIDs.removeAll()
-                copiedSessionRequestID = nil
+            Button("Reset", role: .destructive) {
+                showResetSessionConfirmation = true
             }
         }
         .font(.caption)
+    }
+
+    private func resetCurrentSessionMetrics() {
+        vm.resetSessionStats()
+        sessionCSVExportStatus = ""
+        expandedSessionRequestIDs.removeAll()
+        copiedSessionRequestID = nil
     }
 
     private var hiddenHomeSectionsPlaceholder: some View {
@@ -645,9 +770,8 @@ struct HomeDashboardView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(vm.sessionReportCard.requests.suffix(40).reversed())) { request in
+            LazyVStack(alignment: .leading, spacing: 8) {
+                ForEach(Array(vm.sessionReportCard.requests.suffix(40).reversed())) { request in
                         DisclosureGroup(
                             isExpanded: sessionRequestDisclosureBinding(for: request.id)
                         ) {
@@ -711,10 +835,8 @@ struct HomeDashboardView: View {
                         }
                         .padding(8)
                         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-                    }
                 }
             }
-            .frame(maxHeight: 280)
         }
     }
 
@@ -814,7 +936,7 @@ struct HomeDashboardView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(minWidth: 140, maxWidth: .infinity, alignment: .leading)
         .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 

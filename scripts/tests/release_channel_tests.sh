@@ -40,8 +40,17 @@ assert_file_contains() {
 }
 
 assert_file_contains "${ROOT_DIR}/project.yml" 'if [[ "$CONFIGURATION" != "Release" && "$CONFIGURATION" != "Release-Alpha" ]]; then'
+assert_file_contains "${ROOT_DIR}/project.yml" 'postBuildScripts:'
 assert_file_contains "${ROOT_DIR}/project.yml" 'lipo -create "$ARM64_PRODUCTS/proxypilot" "$X86_64_PRODUCTS/proxypilot" -output "$HELPERS_DIR/proxypilot"'
 assert_file_contains "${ROOT_DIR}/project.yml" 'lipo -create "$ARM64_PRODUCTS/proxypilot-agent" "$X86_64_PRODUCTS/proxypilot-agent" -output "$HELPERS_DIR/proxypilot-agent"'
+assert_file_contains "${ROOT_DIR}/project.yml" 'REPOGPS_SOURCE_RELEASE="$(/usr/bin/plutil -extract source_release raw -o - "$REPOGPS_SOURCE/payload.json")"'
+assert_file_contains "${ROOT_DIR}/project.yml" 'if [[ ! "$REPOGPS_SOURCE_RELEASE" =~ ^[0-9a-f]{7,40}$ ]]; then'
+assert_file_contains "${ROOT_DIR}/project.yml" '--source-release "$REPOGPS_SOURCE_RELEASE"'
+assert_file_contains "${ROOT_DIR}/scripts/build_and_install.sh" '--source-release "$REPOGPS_SOURCE_RELEASE"'
+assert_file_contains "${ROOT_DIR}/scripts/build_and_install.sh" 'ERROR: Embedded RepoGPS manifest does not match the signed binary'
+assert_file_contains "${ROOT_DIR}/scripts/build_and_install.sh" 'tail -80 "$BUILD_LOG" >&2'
+assert_file_contains "${ROOT_DIR}/scripts/build_signed_dmg.sh" '--source-release "${REPOGPS_SOURCE_RELEASE}"'
+assert_file_contains "${ROOT_DIR}/scripts/build_signed_dmg.sh" 'Error: Embedded RepoGPS manifest does not match the signed binary'
 assert_file_contains "${ROOT_DIR}/ProxyPilotCLI/tests/smoke_test.sh" 'if [[ "$(uname -s)" == "Darwin" ]]; then'
 assert_file_contains "${ROOT_DIR}/ProxyPilotCLI/tests/smoke_test.sh" 'agent status assertions skipped because Agent status is macOS-only'
 assert_file_contains "${ROOT_DIR}/scripts/build_signed_dmg.sh" 'Authenticated CLI metadata (paste into proxypilot-versions.json)'

@@ -19,18 +19,45 @@ zsh scripts/update_xcodeproj.sh
 
 # 2. Build Release
 echo "Building ${CHANNEL} Release..."
-xcodebuild \
+BUILD_LOG="$(mktemp -t proxypilot-build)"
+trap 'rm -f "$BUILD_LOG"' EXIT
+if ! xcodebuild \
   -project ProxyPilot.xcodeproj \
   -scheme ProxyPilot-macOS \
   -configuration "$CONFIGURATION" \
   -derivedDataPath "$DERIVED_DATA" \
-  build \
-  2>&1 | tail -1
+  build >"$BUILD_LOG" 2>&1; then
+  tail -80 "$BUILD_LOG" >&2
+  exit 1
+fi
+tail -1 "$BUILD_LOG"
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "ERROR: Missing build output: $APP_PATH" >&2
   exit 1
 fi
+
+REPOGPS_PAYLOAD="$APP_PATH/Contents/Resources/RepoGPSPayload"
+REPOGPS_BINARY="$REPOGPS_PAYLOAD/bin/rgps"
+REPOGPS_SOURCE_RELEASE="$(/usr/bin/plutil -extract source_release raw -o - "$REPOGPS_PAYLOAD/payload.json")"
+if [[ ! "$REPOGPS_SOURCE_RELEASE" =~ ^[0-9a-f]{7,40}$ ]]; then
+  echo "ERROR: Embedded RepoGPS source_release is not an immutable Git SHA" >&2
+  exit 1
+fi
+# Xcode signs nested executables after the post-build phase. Finalize RepoGPS
+# after that step, regenerate its checksum manifest, then reseal the app.
+codesign --force --sign - --options runtime "$REPOGPS_BINARY"
+"$REPOGPS_BINARY" distribution make-manifest \
+  --payload "$REPOGPS_PAYLOAD" \
+  --source-release "$REPOGPS_SOURCE_RELEASE"
+codesign --force --sign - --options runtime "$APP_PATH"
+REPOGPS_EXPECTED_HASH="$(/usr/bin/jq -er '.files[] | select(.path == "bin/rgps") | .sha256' "$REPOGPS_PAYLOAD/payload.json")"
+REPOGPS_ACTUAL_HASH="$(shasum -a 256 "$REPOGPS_BINARY" | awk '{print $1}')"
+if [[ "$REPOGPS_EXPECTED_HASH" != "$REPOGPS_ACTUAL_HASH" ]]; then
+  echo "ERROR: Embedded RepoGPS manifest does not match the signed binary" >&2
+  exit 1
+fi
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
 # 3. Read version from built app
 NEW_VER=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP_PATH/Contents/Info.plist")

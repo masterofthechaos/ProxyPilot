@@ -113,6 +113,17 @@ enum MCPIOSessionLogConsent {
 }
 
 struct SessionStatsToolPayload: Encodable {
+    /// What the numbers below actually cover. Zeros are only meaningful alongside their scope:
+    /// an unlabelled zero previously read as "the session is idle" when it really meant "this
+    /// process is not the one serving the traffic."
+    enum Scope: String, Encodable {
+        /// Totals for one attributed client session, aggregated from the shared session report.
+        case attributedSession = "attributed_session"
+        /// Totals for a proxy running inside this process. Empty whenever the proxy is a
+        /// separate daemon or the GUI, which is the usual arrangement.
+        case inProcessProxy = "in_process_proxy"
+    }
+
     let requests: Int
     let totalTokens: Int
     let promptTokens: Int
@@ -125,6 +136,14 @@ struct SessionStatsToolPayload: Encodable {
     let promptCacheWriteTokens: Int
     let cacheHitRate: Double?
     let cacheAccountingAvailable: Bool
+    let scope: Scope
+    let attributed: Bool
+    let sessionID: String?
+    let source: String?
+    /// Bounds of the traffic actually counted. `uptimeSeconds` describes this MCP process, which
+    /// says nothing about an attributed session, so recency has to be reported separately.
+    let firstRequestAt: Date?
+    let lastRequestAt: Date?
 
     enum CodingKeys: String, CodingKey {
         case requests
@@ -139,5 +158,32 @@ struct SessionStatsToolPayload: Encodable {
         case promptCacheWriteTokens = "prompt_cache_write_tokens"
         case cacheHitRate = "cache_hit_rate"
         case cacheAccountingAvailable = "cache_accounting_available"
+        case scope
+        case attributed
+        case sessionID = "session_id"
+        case source
+        case firstRequestAt = "first_request_at"
+        case lastRequestAt = "last_request_at"
+    }
+}
+
+/// Provenance for `proxy_logs`, which tails a single shared file rather than a per-session stream.
+struct ProxyLogsToolPayload: Encodable {
+    let lines: [String]
+    let path: String
+    let lastModified: Date?
+    let ageSeconds: Int?
+    /// The log is written only by the GUI's built-in proxy. A CLI daemon serving a harness
+    /// session writes nothing here, so an empty or stale file is not evidence of no traffic.
+    let writtenBy: String
+    let coversCurrentSession: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case lines
+        case path
+        case lastModified = "last_modified"
+        case ageSeconds = "age_seconds"
+        case writtenBy = "written_by"
+        case coversCurrentSession = "covers_current_session"
     }
 }

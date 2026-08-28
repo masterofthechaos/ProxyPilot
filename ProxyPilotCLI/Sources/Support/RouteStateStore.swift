@@ -46,16 +46,33 @@ enum RouteStateStore {
     /// shells out to `route set`), and the MCP tool.
     static func withExclusiveLock<T>(_ body: () async throws -> T) async throws -> T {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let descriptor = open(lock.path, O_CREAT | O_RDWR, 0o600)
-        guard descriptor >= 0 else { throw RouteLockUnavailable() }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            close(descriptor)
-            throw RouteLockUnavailable()
-        }
+        let descriptor = try acquireExclusiveLock()
         defer {
             flock(descriptor, LOCK_UN)
             close(descriptor)
         }
         return try await body()
+    }
+
+    /// Opens the lifecycle lock without allowing a subsequently spawned daemon
+    /// to inherit it. `route set` launches `proxypilot start --daemon` while the
+    /// lock is held; without `FD_CLOEXEC`, that long-lived child keeps the same
+    /// flock alive after the parent returns and every future route change fails.
+    static func acquireExclusiveLock(at lockURL: URL = lock) throws -> Int32 {
+        let descriptor = open(lockURL.path, O_CREAT | O_RDWR, 0o600)
+        guard descriptor >= 0 else { throw RouteLockUnavailable() }
+
+        let descriptorFlags = fcntl(descriptor, F_GETFD)
+        guard descriptorFlags >= 0,
+              fcntl(descriptor, F_SETFD, descriptorFlags | FD_CLOEXEC) == 0 else {
+            close(descriptor)
+            throw RouteLockUnavailable()
+        }
+
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            close(descriptor)
+            throw RouteLockUnavailable()
+        }
+        return descriptor
     }
 }

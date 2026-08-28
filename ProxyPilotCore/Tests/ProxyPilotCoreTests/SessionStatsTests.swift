@@ -2,6 +2,20 @@ import XCTest
 @testable import ProxyPilotCore
 
 final class SessionStatsTests: XCTestCase {
+    func testLegacyRequestRecordDecodesWithoutAnalyticsDimensions() throws {
+        let json = #"{"timestamp":0,"model":"legacy-model","promptTokens":1,"completionTokens":2,"durationSeconds":0.5,"path":"/v1/messages","wasStreaming":false}"#.data(using: .utf8)!
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+
+        let record = try decoder.decode(RequestRecord.self, from: json)
+
+        XCTAssertEqual(record.model, "legacy-model")
+        XCTAssertNil(record.providerIdentifier)
+        XCTAssertNil(record.promptCachingMode)
+        XCTAssertNil(record.contextCompactionEnabled)
+        XCTAssertNil(record.translationMode)
+    }
+
     func testRecordRequestUpdatesCountsAndTokens() async {
         let stats = SessionStats()
         await stats.record(model: "gpt-4o", promptTokens: 100, completionTokens: 50, durationMs: 1200)

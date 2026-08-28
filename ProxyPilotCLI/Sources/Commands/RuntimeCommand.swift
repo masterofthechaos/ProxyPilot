@@ -10,8 +10,8 @@ struct RuntimeCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "runtime", abstract: "Manage the shared versioned CLI runtime.", subcommands: [RuntimeActivateCommand.self, RuntimeStatusCommand.self])
 }
 
-private enum SharedRuntime {
-    static let version = "1.13.2"
+enum SharedRuntime {
+    static let version = ProxyPilotCommand.configuration.version
     static var root: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".proxypilot") }
     static var payload: URL { root.appendingPathComponent("cli/\(version)/proxypilot") }
     static var stable: URL { root.appendingPathComponent("bin/proxypilot") }

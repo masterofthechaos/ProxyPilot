@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import ProxyPilotCore
 
@@ -374,20 +375,85 @@ enum LocalProxyServerHelpers {
         ProxyErrorResponse.openAI(message: message, type: type)
     }
 
+    /// Errors specific to `appendPrivateLogData`'s hardened open/validate path.
+    enum PrivateLogWriteError: Error {
+        /// `open(2)` failed — including the symlink case, where `O_NOFOLLOW`
+        /// makes a symlink at the final path component fail with `ELOOP`.
+        case openFailed
+        /// `fstat(2)` on the opened descriptor failed.
+        case statFailed
+        /// The opened descriptor is not a regular file we own (e.g. a
+        /// pre-seeded FIFO, device node, or a file owned by another user).
+        case unsafeTarget
+    }
+
+    /// Serializes every append across all callers (and detached tasks) so
+    /// concurrent log lines cannot interleave or clobber one another, and so
+    /// the open→validate→fchmod→write sequence below is atomic with respect
+    /// to itself. `/tmp` is world-writable, so this also protects the
+    /// open/validate step from being raced by another process.
+    private static let privateLogAppendLock = NSLock()
+
+    /// Append `data` to the private log at `url`, hardened against a
+    /// pre-seeded `/tmp` target (symlink, FIFO, or foreign-owned file) and
+    /// against concurrent writers losing or interleaving lines.
+    ///
+    /// The whole open→validate→write sequence runs under a single process-wide
+    /// lock and uses `O_APPEND` so each call writes its full line as one
+    /// atomic unit relative to every other caller.
     static func appendPrivateLogData(_ data: Data, to url: URL) throws {
-        let permissions = 0o600
-        let fileManager = FileManager.default
-        if !fileManager.fileExists(atPath: url.path) {
-            fileManager.createFile(
-                atPath: url.path,
-                contents: nil,
-                attributes: [.posixPermissions: permissions]
-            )
+        privateLogAppendLock.lock()
+        defer { privateLogAppendLock.unlock() }
+
+        // O_NOFOLLOW refuses to open a symlink at the final path component
+        // (fails with ELOOP) instead of silently following it to whatever
+        // an attacker pre-seeded /tmp with. O_NONBLOCK is required for the
+        // FIFO case: without it, opening a reader-less FIFO for writing
+        // blocks in open(2) indefinitely — which, under the lock above,
+        // would deadlock every other appender for the process's lifetime.
+        // With O_NONBLOCK, a reader-less FIFO fails fast with ENXIO; a FIFO
+        // that does have a reader open still gets rejected below by the
+        // S_ISREG check. O_NONBLOCK is a no-op for regular files, so the
+        // normal path is unaffected; it's cleared after validation anyway
+        // so nothing downstream has to reason about it.
+        let descriptor = open(
+            url.path,
+            O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_NONBLOCK,
+            S_IRUSR | S_IWUSR
+        )
+        guard descriptor >= 0 else {
+            throw PrivateLogWriteError.openFailed
         }
-        try fileManager.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
-        let handle = try FileHandle(forWritingTo: url)
+
+        var info = stat()
+        guard fstat(descriptor, &info) == 0 else {
+            close(descriptor)
+            throw PrivateLogWriteError.statFailed
+        }
+
+        // Refuse anything that isn't a plain regular file we own — a FIFO,
+        // device node, or a file some other user pre-seeded must be rejected
+        // rather than written to.
+        guard (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == geteuid() else {
+            close(descriptor)
+            throw PrivateLogWriteError.unsafeTarget
+        }
+
+        if (info.st_mode & 0o777) != 0o600 {
+            // Always chmod the descriptor, never the path — a path-based
+            // chmod between our fstat check and here would be racy.
+            _ = fchmod(descriptor, S_IRUSR | S_IWUSR)
+        }
+
+        // Clear O_NONBLOCK now that we've validated this is a regular file;
+        // it was only needed to make the FIFO-open fail fast above.
+        let currentFlags = fcntl(descriptor, F_GETFL)
+        if currentFlags >= 0 {
+            _ = fcntl(descriptor, F_SETFL, currentFlags & ~O_NONBLOCK)
+        }
+
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
-        try handle.seekToEnd()
         try handle.write(contentsOf: data)
     }
 }

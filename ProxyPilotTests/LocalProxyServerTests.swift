@@ -948,6 +948,106 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertEqual(permissions.intValue & 0o777, 0o600)
     }
 
+    // MARK: - appendPrivateLogData hardening (TA-05 / TA-06)
+
+    /// A pre-seeded symlink at the log path must be refused, not followed —
+    /// O_NOFOLLOW makes `open(2)` fail with ELOOP on a symlink final
+    /// component, and the victim file the symlink points at must be left
+    /// completely untouched.
+    func testPrivateLogAppendRefusesSymlinkAndLeavesVictimUntouched() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("proxypilot-local-proxy-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let victimURL = directory.appendingPathComponent("victim.txt")
+        let victimContent = "do-not-touch"
+        try victimContent.write(to: victimURL, atomically: true, encoding: .utf8)
+
+        let symlinkURL = directory.appendingPathComponent("proxy.log")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: victimURL)
+
+        XCTAssertThrowsError(try H.appendPrivateLogData(Data("attacker-controlled\n".utf8), to: symlinkURL))
+
+        let victimAfter = try String(contentsOf: victimURL, encoding: .utf8)
+        XCTAssertEqual(victimAfter, victimContent, "symlink target must be untouched after a refused append")
+    }
+
+    /// A pre-seeded non-regular file (FIFO) at the log path must be refused —
+    /// writing to it could hang the caller or leak data to an unexpected
+    /// reader. A reader end is held open so `open(2)` on the write side
+    /// actually succeeds (matching a real pre-seeding attack) and the
+    /// rejection is proven to come from the S_ISREG file-type check, not
+    /// merely from a reader-less FIFO failing fast at open time.
+    func testPrivateLogAppendRefusesForeignFileType() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("proxypilot-local-proxy-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let fifoURL = directory.appendingPathComponent("proxy.log")
+        let mkfifoResult = fifoURL.path.withCString { mkfifo($0, S_IRUSR | S_IWUSR) }
+        try XCTSkipUnless(mkfifoResult == 0, "mkfifo failed in this test environment")
+
+        // Hold a non-blocking read end open for the duration of the test so
+        // the write-side open(2) below doesn't hang or fail with ENXIO —
+        // it must reach the fstat/S_ISREG check and be rejected there.
+        let readerDescriptor = fifoURL.path.withCString { open($0, O_RDONLY | O_NONBLOCK) }
+        try XCTSkipUnless(readerDescriptor >= 0, "could not open FIFO read end in this test environment")
+        defer { close(readerDescriptor) }
+
+        XCTAssertThrowsError(try H.appendPrivateLogData(Data("test\n".utf8), to: fifoURL))
+    }
+
+    /// A fresh file gets created at 0600 with the expected content, and a
+    /// second append lands after the first rather than overwriting it.
+    func testPrivateLogAppendCreatesThenAppendsWithCorrectPermissionsAndContent() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("proxypilot-local-proxy-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let logURL = directory.appendingPathComponent("proxy.log")
+        try H.appendPrivateLogData(Data("first\n".utf8), to: logURL)
+
+        let attributesAfterFirst = try FileManager.default.attributesOfItem(atPath: logURL.path)
+        let permissionsAfterFirst = try XCTUnwrap(attributesAfterFirst[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(permissionsAfterFirst.intValue & 0o777, 0o600)
+        XCTAssertEqual(try String(contentsOf: logURL, encoding: .utf8), "first\n")
+
+        try H.appendPrivateLogData(Data("second\n".utf8), to: logURL)
+
+        let attributesAfterSecond = try FileManager.default.attributesOfItem(atPath: logURL.path)
+        let permissionsAfterSecond = try XCTUnwrap(attributesAfterSecond[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(permissionsAfterSecond.intValue & 0o777, 0o600)
+        XCTAssertEqual(try String(contentsOf: logURL, encoding: .utf8), "first\nsecond\n")
+    }
+
+    /// Many concurrent appends of distinct, individually-identifiable lines
+    /// must all land — whole, unbroken, and exactly once — with no lost
+    /// writes or interleaved fragments from the lack of a lock/O_APPEND.
+    func testPrivateLogAppendSerializesConcurrentWritersWithoutLossOrInterleaving() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("proxypilot-local-proxy-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let logURL = directory.appendingPathComponent("proxy.log")
+        let writerCount = 200
+        let expectedLines = Set((0..<writerCount).map { "concurrent-line-\($0)" })
+
+        DispatchQueue.concurrentPerform(iterations: writerCount) { index in
+            let line = "concurrent-line-\(index)\n"
+            try? H.appendPrivateLogData(Data(line.utf8), to: logURL)
+        }
+
+        let contents = try String(contentsOf: logURL, encoding: .utf8)
+        let lines = contents.split(separator: "\n").map(String.init)
+
+        XCTAssertEqual(lines.count, writerCount, "every writer's line must be present exactly once, none lost or merged")
+        XCTAssertEqual(Set(lines), expectedLines, "every line must be whole and unbroken — no interleaved fragments")
+    }
+
     // MARK: - Listener loopback bind regression guard
     //
     // Regression context: commit 52aa0c7 (v1.10.0 triadic audit) tried to enforce
@@ -1103,7 +1203,7 @@ final class LocalProxyServerTests: XCTestCase {
         XCTAssertTrue(config.requiresUpstreamAPIKey)
     }
 
-    func testProtectedRoutesRequireAuthWhenUpstreamCredentialIsPresentAndAuthDisabled() {
+    func testProtectedRoutesRemainUnauthenticatedWhenUpstreamCredentialIsPresentAndAuthDisabled() {
         let config = LocalProxyServer.Config(
             host: "127.0.0.1",
             port: 4000,
@@ -1119,7 +1219,7 @@ final class LocalProxyServerTests: XCTestCase {
             googleThoughtSignatureStore: nil
         )
 
-        XCTAssertTrue(config.requiresAuthForProtectedRoutes)
+        XCTAssertFalse(config.requiresAuthForProtectedRoutes)
     }
 
     func testProtectedRoutesRequireAuthWhenLocalAuthEnabled() {

@@ -1,0 +1,91 @@
+{
+  "behavior_pack_version" : "1",
+  "engine_version" : "1.18.4",
+  "files" : [
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Info.plist",
+      "sha256" : "150c4a1c84f5b29fd6cc5262aa3b0e82827ca5908da6890ce60c0ddd3226e789"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/skills\/repogps-basecamp\/SKILL.md",
+      "sha256" : "1910a09b62b49d85a476d338d585c0494ee89914c9812bef9e5350825ab2e24f"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/skills\/repogps-resurface\/SKILL.md",
+      "sha256" : "64e5eb810a8bc6e27e233df48dc9c32f2287f57fa5134ab474d14a323b4437f6"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/BehaviorPack\/skills\/repogps-retrace\/SKILL.md",
+      "sha256" : "1397e95511df82582df7c2514662cc9143283b9cd9ca35db39ce5aba2da4198f"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/almanac\/01-genesis.sh",
+      "sha256" : "7370a236a390dc8315f98f687a77225becbb22cbb54dc2271f23c75492144b3d"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/almanac\/02-cadence.sh",
+      "sha256" : "cceecd34984c00faa899b214b8659f4a151d5d03730a05b665c260e86ed8a0e2"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/almanac\/03-eras.sh",
+      "sha256" : "9043be0be9985ee76e14627e3ed376385ff495a32b82aa107945a53b46a8f663"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/almanac\/04-breakage.sh",
+      "sha256" : "a8288afd2ecd6e3456f0adba453cf9cc696c7ed092d2c741b703e3312d352976"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/almanac\/05-churn.sh",
+      "sha256" : "16f63af969b4e69566d5a3c6f0a2e790891ee17f3469e43b07f57464d715603c"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/almanac\/almanac.sh",
+      "sha256" : "1d0dd88ae92abc1e354396bb695dd8e2686ffd474ac3e6d961519f21a9bc655d"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/almanac\/config.sh",
+      "sha256" : "a50127b53fa601294caea82f68de6c2ceff623b94cda55def9e168e60eda0103"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/almanac\/install-gate.sh",
+      "sha256" : "1fbe9158cf120ff8623ce0313660397fcb7983ec467d294cc940a61f7af2834b"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/waypoint-index-gate.sh",
+      "sha256" : "0f31de1293d50a81d33f1e9007a946a89e88ba6b956174704428a383a1d51723"
+    },
+    {
+      "executable" : false,
+      "path" : "bin\/RepoGPS_RepoGPSCore.bundle\/Contents\/Resources\/Resources\/Instrumentation\/waypoint-index.sh",
+      "sha256" : "621729cadb49374def90419775412b06ef8162d6327b72febce8ad426a4de5a9"
+    },
+    {
+      "executable" : true,
+      "path" : "bin\/rgps",
+      "sha256" : "67f42856c77f8559a7bce6f5407d3a3f6f6bc30c847847b51bea64e56faca363"
+    }
+  ],
+  "minimum_proxypilot_capabilities" : {
+    "active_model_aliasing" : 1,
+    "request_attribution" : 1,
+    "route_control" : 1,
+    "session_storage" : 1
+  },
+  "payload_version" : "0.4.0",
+  "repogps_version" : "0.4.0",
+  "schema_version" : 1,
+  "source_release" : "1747010"
+}

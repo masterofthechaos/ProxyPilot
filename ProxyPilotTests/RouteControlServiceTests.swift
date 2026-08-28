@@ -10,9 +10,17 @@ final class RouteControlServiceTests: XCTestCase {
     /// `route` subcommand at all, so PATH resolution fails silently.
     func testCandidateBinariesPreferSharedRuntimeAndExcludePATH() {
         let home = URL(fileURLWithPath: "/Users/example")
-        let candidates = RouteControlService.candidateBinaries(home: home)
+        let relocatedApp = URL(fileURLWithPath: "/private/tmp/Relocated ProxyPilot.app")
+        let candidates = RouteControlService.candidateBinaries(
+            home: home,
+            applicationBundleURL: relocatedApp
+        )
 
         XCTAssertEqual(candidates.first?.path, "/Users/example/.proxypilot/bin/proxypilot")
+        XCTAssertEqual(
+            candidates.dropFirst().first?.path,
+            "/private/tmp/Relocated ProxyPilot.app/Contents/Helpers/proxypilot"
+        )
         XCTAssertTrue(candidates.contains { $0.path.hasPrefix("/Applications/ProxyPilot.app") })
         XCTAssertFalse(candidates.contains { $0.path.contains(".local/bin") })
     }

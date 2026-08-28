@@ -873,7 +873,16 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         let rewrittenBody = ActiveModelAlias.rewriteJSONBody(bodyData, activeModel: config.preferredAnthropicUpstreamModel)
-        let sanitizedBody = withStreamingUsageInjected(sanitizedChatRequestBody(rewrittenBody))
+        let tutorBody = TutorRequestAdapter.mutateChatCompletionsBody(
+            rewrittenBody,
+            envelopeHeader: head.headers[TutorRequestAdapter.headerName].first,
+            attribution: RequestAttribution.validated(
+                client: head.headers["X-ProxyPilot-Client"].first,
+                sessionID: head.headers["X-ProxyPilot-Session-ID"].first
+            ),
+            provider: config.upstreamProvider
+        )
+        let sanitizedBody = withStreamingUsageInjected(sanitizedChatRequestBody(tutorBody))
         let requestModel = parsedRequestModel ?? config.preferredAnthropicUpstreamModel
 
         // Collect headers as tuples
@@ -1273,7 +1282,13 @@ final class HTTPHandler: ChannelInboundHandler, @unchecked Sendable {
             promptCacheWriteTokens: recordsCacheTelemetry ? (promptCacheWriteTokens ?? responseUsage?.promptCacheWrite) : nil,
             durationSeconds: Date().timeIntervalSince(startedAt),
             path: path,
-            wasStreaming: wasStreaming
+            wasStreaming: wasStreaming,
+            providerIdentifier: config.upstreamProvider.rawValue,
+            promptCachingMode: config.promptCaching.mode.rawValue,
+            contextCompactionEnabled: config.contextCompaction.isEnabled,
+            translationMode: config.isAnthropicPassthroughActive
+                ? "anthropic_passthrough"
+                : config.anthropicTranslatorMode.rawValue
         ))
     }
 

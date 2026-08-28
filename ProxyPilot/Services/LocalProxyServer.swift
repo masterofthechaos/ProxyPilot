@@ -15,6 +15,11 @@ struct ContextCompactionStat: Equatable, Sendable {
     let date: Date
 }
 
+struct RequestAnalyticsMetadata: Equatable, Sendable {
+    let providerIdentifier: String
+    let pathCategory: String
+}
+
 @MainActor
 final class LocalProxyState: ObservableObject {
     nonisolated init() {}
@@ -35,6 +40,7 @@ final class LocalProxyState: ObservableObject {
 
     private var activeRequestIDs: Set<UUID> = []
     private var activeRequestModels: [UUID: String] = [:]
+    private var activeRequestAnalytics: [UUID: RequestAnalyticsMetadata] = [:]
 
     func resetSessionTracking() {
         sessionRequestCount = 0
@@ -42,12 +48,18 @@ final class LocalProxyState: ObservableObject {
         failedRequestCount = 0
         activeRequestIDs.removeAll()
         activeRequestModels.removeAll()
+        activeRequestAnalytics.removeAll()
         activeModels.removeAll()
         lastFailureAt = nil
         lastContextCompaction = nil
     }
 
-    func beginRequest(id: UUID, modelName: String?, clearsUpstreamModelAttribution: Bool = false) {
+    func beginRequest(
+        id: UUID,
+        modelName: String?,
+        analyticsMetadata: RequestAnalyticsMetadata? = nil,
+        clearsUpstreamModelAttribution: Bool = false
+    ) {
         if clearsUpstreamModelAttribution {
             lastUpstreamModelUsed = ""
         }
@@ -58,6 +70,7 @@ final class LocalProxyState: ObservableObject {
             lastModelSeen = modelName
             activeRequestModels[id] = modelName
         }
+        activeRequestAnalytics[id] = analyticsMetadata
         refreshActiveModels()
     }
 
@@ -72,6 +85,7 @@ final class LocalProxyState: ObservableObject {
     func completeRequest(id: UUID) -> Bool {
         guard activeRequestIDs.remove(id) != nil else { return false }
         activeRequestModels.removeValue(forKey: id)
+        activeRequestAnalytics.removeValue(forKey: id)
         pendingRequestCount = activeRequestIDs.count
         refreshActiveModels()
         return true
@@ -81,6 +95,7 @@ final class LocalProxyState: ObservableObject {
     func failRequest(id: UUID) -> Bool {
         guard activeRequestIDs.remove(id) != nil else { return false }
         activeRequestModels.removeValue(forKey: id)
+        activeRequestAnalytics.removeValue(forKey: id)
         failedRequestCount += 1
         pendingRequestCount = activeRequestIDs.count
         lastFailureAt = Date()
@@ -93,11 +108,16 @@ final class LocalProxyState: ObservableObject {
         failedRequestCount += failedCount
         activeRequestIDs.removeAll()
         activeRequestModels.removeAll()
+        activeRequestAnalytics.removeAll()
         pendingRequestCount = 0
         activeModels.removeAll()
         if failedCount > 0 {
             lastFailureAt = Date()
         }
+    }
+
+    func analyticsMetadata(for id: UUID) -> RequestAnalyticsMetadata? {
+        activeRequestAnalytics[id]
     }
 
     func importCompletedRequests(count: Int, lastModel: String?) {
@@ -123,6 +143,7 @@ final class LocalProxyState: ObservableObject {
 // `ProxyPilotCore/Sources/ProxyPilotCore/Models/InputOutputLoggingStore.swift`.
 
 final class LocalProxyServer: @unchecked Sendable {
+    var telemetryTracker: ((_ name: String, _ payload: [String: String]) -> Void)?
     enum ServerError: LocalizedError {
         case alreadyRunning
         case notRunning
@@ -146,6 +167,7 @@ final class LocalProxyServer: @unchecked Sendable {
         let sessionID: String
         let masterKey: String
         let upstreamProvider: UpstreamProvider
+        let analyticsProviderIdentifier: String
         let upstreamAPIBase: URL
         let upstreamAPIKey: String?
         let allowedModels: Set<String>
@@ -169,6 +191,7 @@ final class LocalProxyServer: @unchecked Sendable {
             sessionID: String = UUID().uuidString,
             masterKey: String,
             upstreamProvider: UpstreamProvider,
+            analyticsProviderIdentifier: String? = nil,
             upstreamAPIBase: URL,
             upstreamAPIKey: String?,
             allowedModels: Set<String>,
@@ -187,6 +210,7 @@ final class LocalProxyServer: @unchecked Sendable {
             self.sessionID = sessionID
             self.masterKey = masterKey
             self.upstreamProvider = upstreamProvider
+            self.analyticsProviderIdentifier = analyticsProviderIdentifier ?? upstreamProvider.rawValue
             self.upstreamAPIBase = upstreamAPIBase
             self.upstreamAPIKey = upstreamAPIKey
             self.allowedModels = allowedModels
@@ -212,10 +236,7 @@ final class LocalProxyServer: @unchecked Sendable {
         }
 
         var requiresAuthForProtectedRoutes: Bool {
-            let forwardsCredential = !(upstreamAPIKey?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .isEmpty ?? true)
-            return requiresAuth || forwardsCredential
+            requiresAuth
         }
 
         var upstreamAPIBaseURL: String {
@@ -249,6 +270,10 @@ final class LocalProxyServer: @unchecked Sendable {
 
     func start(config: Config) throws {
         if listener != nil { throw ServerError.alreadyRunning }
+        connectionCountLock.lock()
+        activeConnectionCount = 0
+        releasedConnectionIDs.removeAll()
+        connectionCountLock.unlock()
         Task { @MainActor in
             state.resetSessionTracking()
             state.lastModelSeen = ""
@@ -347,6 +372,17 @@ final class LocalProxyServer: @unchecked Sendable {
         guard let listener else { throw ServerError.notRunning }
         listener.cancel()
         self.listener = nil
+        // listener.cancel() only stops accepting new connections; any
+        // NWConnections already accepted keep running and may still fire
+        // their own release later (harmless — releaseConnectionSlotIfNeeded's
+        // max(0, ...) clamps it, and start() resets again). Reset the slot
+        // accounting at both lifecycle boundaries so releasedConnectionIDs
+        // cannot accumulate unboundedly across restarts on this
+        // app-lifetime-retained instance.
+        connectionCountLock.lock()
+        activeConnectionCount = 0
+        releasedConnectionIDs.removeAll()
+        connectionCountLock.unlock()
         Task { @MainActor in
             state.failAllPendingRequests()
             state.isRunning = false
@@ -542,7 +578,9 @@ final class LocalProxyServer: @unchecked Sendable {
                     await RequestAttributionContext.$current.withValue(attribution) {
                         await self.beginTrackedRequest(
                             id: trackingID,
-                            modelName: modelName
+                            modelName: modelName,
+                            providerIdentifier: config.analyticsProviderIdentifier,
+                            pathCategory: "anthropic_messages"
                         )
                         await self.handleAnthropicMessages(body: body, headers: headers, connection: connection, config: config, trackingID: trackingID)
                     }
@@ -557,12 +595,14 @@ final class LocalProxyServer: @unchecked Sendable {
                     await self.beginTrackedRequest(
                         id: trackingID,
                         modelName: modelName,
+                        providerIdentifier: config.analyticsProviderIdentifier,
+                        pathCategory: "chat_completions",
                         clearsUpstreamModelAttribution: true
                     )
                     if isStreaming {
-                        await self.handleStreamingChatCompletions(body: body, connection: connection, config: config, trackingID: trackingID)
+                        await self.handleStreamingChatCompletions(body: body, tutorEnvelope: headers["x-repogps-tutor"], connection: connection, config: config, trackingID: trackingID)
                     } else {
-                        await self.handleChatCompletions(body: body, connection: connection, config: config, trackingID: trackingID)
+                        await self.handleChatCompletions(body: body, tutorEnvelope: headers["x-repogps-tutor"], connection: connection, config: config, trackingID: trackingID)
                     }
                 }
             }
@@ -616,7 +656,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
     // MARK: - POST /v1/chat/completions (buffered)
 
-    private func handleChatCompletions(body: Data, connection: NWConnection, config: Config, trackingID: UUID) async {
+    private func handleChatCompletions(body: Data, tutorEnvelope: String?, connection: NWConnection, config: Config, trackingID: UUID) async {
         let requestStartTime = Date()
         let requestModel = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String ?? ""
         if config.requiresUpstreamAPIKey {
@@ -652,7 +692,13 @@ final class LocalProxyServer: @unchecked Sendable {
         }
 
         let rewrittenBody = ActiveModelAlias.rewriteJSONBody(body, activeModel: config.preferredAnthropicUpstreamModel)
-        let outboundBody = sanitizedChatRequestBody(rewrittenBody, provider: config.upstreamProvider)
+        let tutorBody = TutorRequestAdapter.mutateChatCompletionsBody(
+            rewrittenBody,
+            envelopeHeader: tutorEnvelope,
+            attribution: RequestAttributionContext.current,
+            provider: config.upstreamProvider
+        )
+        let outboundBody = sanitizedChatRequestBody(tutorBody, provider: config.upstreamProvider)
         let upstreamURL = buildUpstreamURL(config: config, path: config.upstreamProvider.chatCompletionsPath)
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "POST"
@@ -735,7 +781,7 @@ final class LocalProxyServer: @unchecked Sendable {
 
     // MARK: - POST /v1/chat/completions (streaming)
 
-    private func handleStreamingChatCompletions(body: Data, connection: NWConnection, config: Config, trackingID: UUID) async {
+    private func handleStreamingChatCompletions(body: Data, tutorEnvelope: String?, connection: NWConnection, config: Config, trackingID: UUID) async {
         let requestStartTime = Date()
         let requestModel = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["model"] as? String ?? ""
         if config.requiresUpstreamAPIKey {
@@ -771,7 +817,13 @@ final class LocalProxyServer: @unchecked Sendable {
         }
 
         let rewrittenBody = ActiveModelAlias.rewriteJSONBody(body, activeModel: config.preferredAnthropicUpstreamModel)
-        let outboundBody = sanitizedChatRequestBody(rewrittenBody, provider: config.upstreamProvider)
+        let tutorBody = TutorRequestAdapter.mutateChatCompletionsBody(
+            rewrittenBody,
+            envelopeHeader: tutorEnvelope,
+            attribution: RequestAttributionContext.current,
+            provider: config.upstreamProvider
+        )
+        let outboundBody = sanitizedChatRequestBody(tutorBody, provider: config.upstreamProvider)
         let upstreamURL = buildUpstreamURL(config: config, path: config.upstreamProvider.chatCompletionsPath)
         var request = URLRequest(url: upstreamURL)
         request.httpMethod = "POST"
@@ -1703,20 +1755,40 @@ final class LocalProxyServer: @unchecked Sendable {
     func beginTrackedRequest(
         id: UUID,
         modelName: String?,
+        providerIdentifier: String? = nil,
+        pathCategory: String = "other",
         clearsUpstreamModelAttribution: Bool = false
     ) async {
         await MainActor.run { [weak self] in
             self?.state.beginRequest(
                 id: id,
                 modelName: modelName,
+                analyticsMetadata: providerIdentifier.map {
+                    RequestAnalyticsMetadata(providerIdentifier: $0, pathCategory: pathCategory)
+                },
                 clearsUpstreamModelAttribution: clearsUpstreamModelAttribution
             )
         }
     }
 
     private func failTrackedRequest(id: UUID) async {
+        let clientSurface = RequestAttributionContext.current?.client ?? "gui"
         await MainActor.run { [weak self] in
-            _ = self?.state.failRequest(id: id)
+            guard let self else { return }
+            let metadata = self.state.analyticsMetadata(for: id)
+            guard self.state.failRequest(id: id) else { return }
+            self.telemetryTracker?(
+                "proxy_request_failed",
+                [
+                    "stage": "proxy_request",
+                    "error_class": "request_failed",
+                    "status_class": "unknown",
+                    "path_category": metadata?.pathCategory ?? "other",
+                    "provider_identifier": metadata?.providerIdentifier ?? "unknown",
+                    "client_surface": clientSurface,
+                    "retryable": "unknown"
+                ]
+            )
         }
     }
 
@@ -1772,7 +1844,13 @@ final class LocalProxyServer: @unchecked Sendable {
             promptCacheWriteTokens: record.promptCacheWriteTokens,
             durationSeconds: record.durationSeconds,
             path: record.path,
-            wasStreaming: record.wasStreaming
+            wasStreaming: record.wasStreaming,
+            providerIdentifier: config.analyticsProviderIdentifier,
+            promptCachingMode: config.promptCaching.mode.rawValue,
+            contextCompactionEnabled: config.contextCompaction.isEnabled,
+            translationMode: config.isAnthropicPassthroughActive
+                ? "anthropic_passthrough"
+                : config.anthropicTranslatorMode.rawValue
         )
         try? SessionReportStore.append(
             SessionReportEvent(
@@ -2138,8 +2216,11 @@ final class LocalProxyServer: @unchecked Sendable {
         releasedConnectionIDs.insert(connectionID)
         activeConnectionCount = max(0, activeConnectionCount - 1)
 
-        // Set grows monotonically; reset happens on server stop/restart.
-        // Memory: ~36 bytes per UUID. 100K connections ≈ 4 MB — acceptable.
+        // Set grows monotonically within a single run, but is explicitly
+        // cleared (along with activeConnectionCount) in both start() and
+        // stop() — not just implied by "restart" — so it cannot accumulate
+        // across the app-lifetime-retained LocalProxyServer instance.
+        // Memory within one run: ~36 bytes per UUID. 100K connections ≈ 4 MB.
     }
 
     private func appendToolchainLog(_ lines: [String]) {
